@@ -157,8 +157,15 @@ namespace RC::Unreal::UObjectGlobals
         }
 
         UObjectGlobals::ForEachUObject([&](UObject* Object, [[maybe_unused]]int32_t ChunkIndex, [[maybe_unused]]int32_t ObjectIndex) {
-            // In order to remain safe to use early in init before we've hooked FName::ToString up to KismetStringLibrary:Conv_NameToString, we have to
+            // In order to remain safe to use early in init before we've hooked FName::ToString up to KismetSystemLibrary:Conv_NameToString, we have to
             // compare FNames directly instead of using GetFullName.
+            //
+            // Note: chain levels that don't match any NamePart are SKIPPED rather than
+            // aborting the walk, so objects whose outer chain has extra levels (e.g.
+            // CDOs whose immediate outer is the owning UClass: Default__Foo -> Foo ->
+            // package -> /Script) still match when all NameParts appear somewhere in
+            // the chain. This matches the loose "find if all parts present" intent of
+            // the original scan and is what the required-objects init loop relies on.
             int32_t NumPathParts{};
             auto PathObject = Object;
             while (PathObject)
@@ -167,40 +174,36 @@ namespace RC::Unreal::UObjectGlobals
                 const auto It = std::ranges::find_if(NameParts, [&](const FName NamePart) {
                     return NamePart.Equals(PathName);
                 });
-                if (It == NameParts.end())
+                if (It != NameParts.end())
                 {
-                    return LoopAction::Continue;
-                }
-                else
-                {
-                    auto NextOuter = PathObject->GetOuterPrivate();
-                    // Validate the outer pointer before following it.
-                    if (NextOuter)
-                    {
-                        const auto OuterAddr = reinterpret_cast<uintptr_t>(NextOuter);
-                        if (OuterAddr < 0x7e0000000000 || OuterAddr > 0x7fffffffffff)
-                        {
-                            NextOuter = nullptr;
-                        }
-#ifdef __linux__
-                        // Safe probe: verify the outer object's vtable is readable before following.
-                        // This catches stale pointers to freed-but-still-mapped objects.
-                        else
-                        {
-                            // Direct read — the entire iteration body runs inside
-                            // ue4ss_with_iter_recovery(), so a fault here is caught and
-                            // the item skipped. process_vm_readv() was a syscall per hop
-                            // (~800k syscalls per full scan over 158k objects) that made
-                            // init take many minutes; the recovery wrapper makes it
-                            // redundant.
-                            volatile uint64_t probe = *reinterpret_cast<volatile uint64_t*>(OuterAddr);
-                            (void)probe;
-                        }
-#endif
-                    }
-                    PathObject = NextOuter;
                     ++NumPathParts;
                 }
+                auto NextOuter = PathObject->GetOuterPrivate();
+                // Validate the outer pointer before following it.
+                if (NextOuter)
+                {
+                    const auto OuterAddr = reinterpret_cast<uintptr_t>(NextOuter);
+                    if (OuterAddr < 0x7e0000000000 || OuterAddr > 0x7fffffffffff)
+                    {
+                        NextOuter = nullptr;
+                    }
+#ifdef __linux__
+                    // Safe probe: verify the outer object's vtable is readable before following.
+                    // This catches stale pointers to freed-but-still-mapped objects.
+                    else
+                    {
+                        // Direct read — the entire iteration body runs inside
+                        // ue4ss_with_iter_recovery(), so a fault here is caught and
+                        // the item skipped. process_vm_readv() was a syscall per hop
+                        // (~800k syscalls per full scan over 158k objects) that made
+                        // init take many minutes; the recovery wrapper makes it
+                        // redundant.
+                        volatile uint64_t probe = *reinterpret_cast<volatile uint64_t*>(OuterAddr);
+                        (void)probe;
+                    }
+#endif
+                }
+                PathObject = NextOuter;
             }
             if (NumPathParts == NameParts.size())
             {
@@ -219,17 +222,59 @@ namespace RC::Unreal::UObjectGlobals
     auto StaticFindObject_InternalNoToStringFromStrings(const std::vector<StringViewType>& NameParts) -> UObject*
     {
         std::vector<FName> Names{};
+#ifdef __linux__
+        // Split each path part into its individual name components. Callers pass
+        // whole package paths (e.g. "/Script/CoreUObject") as a single part, but the
+        // outer-chain walk above compares each object's single NamePrivate against
+        // each part — an unsplit path string can never equal an object name, so
+        // every lookup silently returned null (KSL=0x0, all required objects
+        // "Need to construct", 8-minute init stall). The first component keeps its
+        // leading slash because the root script package is named "/Script".
+        for (const auto& NamePart : NameParts)
+        {
+            SplitPathToNameParts(NamePart, Names);
+        }
+#else
         for (const auto& NamePart : NameParts)
         {
             Names.emplace_back(NamePart, FNAME_Find);
         }
-#ifdef __linux__
+#endif
         auto result = StaticFindObject_InternalNoToStringFromNames(Names);
         return result;
-#else
-        return StaticFindObject_InternalNoToStringFromNames(Names);
-#endif
     }
+
+#ifdef __linux__
+    // Splits a path string (e.g. "/Script/CoreUObject") into individual name
+    // components ("Script" keeps its leading slash -> "/Script", then
+    // "CoreUObject"). Whole paths never equal a single object's NamePrivate, so
+    // the outer-chain walk in StaticFindObject_InternalNoToStringFromNames can
+    // only match component-wise. Shared by StaticFindObject_InternalNoToStringFromStrings
+    // and Hook::AddRequiredObject.
+    auto SplitPathToNameParts(const StringViewType& PathPart, std::vector<FName>& OutNames) -> void
+    {
+        const bool bHadLeadingSlash = !PathPart.empty() && PathPart[0] == STR('/');
+        size_t Start = 0;
+        bool bFirst = true;
+        while (Start <= PathPart.size())
+        {
+            const size_t Slash = PathPart.find(STR('/'), Start);
+            const size_t End = (Slash == StringViewType::npos) ? PathPart.size() : Slash;
+            if (End > Start)
+            {
+                StringType Component(PathPart.substr(Start, End - Start));
+                if (bFirst && bHadLeadingSlash && !Component.empty() && Component[0] != STR('/'))
+                {
+                    Component.insert(Component.begin(), STR('/'));
+                }
+                OutNames.emplace_back(Component, FNAME_Find);
+                bFirst = false;
+            }
+            if (Slash == StringViewType::npos) { break; }
+            Start = Slash + 1;
+        }
+    }
+#endif
 
     auto static IsValidObjectForFindXOf(UObject* object) -> bool
     {

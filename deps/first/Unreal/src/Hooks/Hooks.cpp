@@ -515,6 +515,14 @@ namespace RC::Unreal::Hook
         std::vector<FName> NameParts{};
         for (const auto& NamePart : ObjectFullTypelessName)
         {
+#ifdef __linux__
+            // Split path parts (e.g. "/Script/CoreUObject") into individual name
+            // components so the outer-chain walk in StaticFindObject_InternalNoToStringFromNames
+            // can match single object names. Without this, a whole path string never
+            // equals any object's NamePrivate and every required object stays
+            // "Need to construct" forever (8-minute init stall, mods never start).
+            UObjectGlobals::SplitPathToNameParts(NamePart, NameParts);
+#else
             // Try find first, and only add a new name if an existing name wasn't found.
             // This is because of a bug with FNAME_Add (perhaps wrong constructor found) that causes a new name to be created with a number instead of retrieving the existing one.
             auto NamePartName = FName(NamePart, FNAME_Find);
@@ -523,6 +531,7 @@ namespace RC::Unreal::Hook
                 NamePartName = FName(NamePart, FNAME_Add);
             }
             NameParts.push_back(NamePartName);
+#endif
         }
         if (!UObjectGlobals::StaticFindObject_InternalNoToStringFromNames(NameParts))
         {

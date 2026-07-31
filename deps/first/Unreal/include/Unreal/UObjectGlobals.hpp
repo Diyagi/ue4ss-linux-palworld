@@ -208,6 +208,14 @@ namespace RC::Unreal::UObjectGlobals
     RC_UE_API auto StaticFindObject_InternalSlow(UClass* Object, UObject* ChunkIndex, const CharType* OrigInName, bool bExactClass = false) -> UObject*;
     RC_UE_API auto StaticFindObject_InternalNoToStringFromStrings(const std::vector<StringViewType>& NameParts) -> UObject*;
     RC_UE_API auto StaticFindObject_InternalNoToStringFromNames(const std::vector<FName>& NameParts) -> UObject*;
+#ifdef __linux__
+    // Splits a path string (e.g. "/Script/CoreUObject") into individual name
+    // components ("Script" keeps its leading slash -> "/Script", then
+    // "CoreUObject"). Whole paths never equal a single object's NamePrivate, so
+    // the outer-chain walk in StaticFindObject_InternalNoToStringFromNames can
+    // only match component-wise.
+    RC_UE_API auto SplitPathToNameParts(const StringViewType& PathPart, std::vector<FName>& OutNames) -> void;
+#endif
 
     template<UObjectPointerDerivative ObjectType = UObject*>
     auto StaticFindObject(UClass* ObjectClass, UObject* InObjectPackage, const CharType* OrigInName, bool bExactClass = false) -> ObjectType
