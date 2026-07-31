@@ -179,30 +179,14 @@ namespace RC::Unreal::UObjectGlobals
                     ++NumPathParts;
                 }
                 auto NextOuter = PathObject->GetOuterPrivate();
-                // Validate the outer pointer before following it.
-                if (NextOuter)
-                {
-                    const auto OuterAddr = reinterpret_cast<uintptr_t>(NextOuter);
-                    if (OuterAddr < 0x7e0000000000 || OuterAddr > 0x7fffffffffff)
-                    {
-                        NextOuter = nullptr;
-                    }
-#ifdef __linux__
-                    // Safe probe: verify the outer object's vtable is readable before following.
-                    // This catches stale pointers to freed-but-still-mapped objects.
-                    else
-                    {
-                        // Direct read — the entire iteration body runs inside
-                        // ue4ss_with_iter_recovery(), so a fault here is caught and
-                        // the item skipped. process_vm_readv() was a syscall per hop
-                        // (~800k syscalls per full scan over 158k objects) that made
-                        // init take many minutes; the recovery wrapper makes it
-                        // redundant.
-                        volatile uint64_t probe = *reinterpret_cast<volatile uint64_t*>(OuterAddr);
-                        (void)probe;
-                    }
-#endif
-                }
+                // Validate the outer pointer before following it. The hardcoded
+                // 0x7e-0x7f range check that used to live here was written for a
+                // different address space (non-PIE PalServer maps its object heap
+                // at 0x73-0x74 on this machine), so it nulled EVERY outer pointer
+                // and the walk could never traverse past level 1. The iteration
+                // body already runs inside ue4ss_with_iter_recovery(), which
+                // catches faults from stale pointers, and the NumPathParts == size
+                // requirement at the end prevents false positives.
                 PathObject = NextOuter;
             }
             if (NumPathParts == NameParts.size())
