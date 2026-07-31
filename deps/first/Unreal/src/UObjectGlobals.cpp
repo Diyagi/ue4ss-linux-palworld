@@ -229,33 +229,38 @@ namespace RC::Unreal::UObjectGlobals
     }
 
 #ifdef __linux__
-    // Splits a path string (e.g. "/Script/CoreUObject") into individual name
-    // components ("Script" keeps its leading slash -> "/Script", then
-    // "CoreUObject"). Whole paths never equal a single object's NamePrivate, so
-    // the outer-chain walk in StaticFindObject_InternalNoToStringFromNames can
-    // only match component-wise. Shared by StaticFindObject_InternalNoToStringFromStrings
+    // Splits a path string into name components for the outer-chain walk.
+    // Palworld Linux: module packages are ROOT-level UObjects whose NamePrivate
+    // is the FULL path with leading slash ("/Script/CoreUObject" = pool idx
+    // 78451, "/Script/Engine" = 132103, verified via engine find-or-add). There
+    // is NO "/Script" root package and no bare "CoreUObject" package, so
+    // splitting on every '/' (as before) yields parts that can never equal a
+    // package's NamePrivate -> walk returns null for every lookup. Keep the
+    // package path as ONE component; split only the trailing object/sub-object
+    // part on '.'. Shared by StaticFindObject_InternalNoToStringFromStrings
     // and Hook::AddRequiredObject.
     auto SplitPathToNameParts(const StringViewType& PathPart, std::vector<FName>& OutNames) -> void
     {
-        const bool bHadLeadingSlash = !PathPart.empty() && PathPart[0] == STR('/');
-        size_t Start = 0;
-        bool bFirst = true;
-        while (Start <= PathPart.size())
+        const size_t LastDot = PathPart.rfind(STR('.'));
+        StringViewType PackagePath = (LastDot == StringViewType::npos) ? PathPart : PathPart.substr(0, LastDot);
+        if (!PackagePath.empty())
         {
-            const size_t Slash = PathPart.find(STR('/'), Start);
-            const size_t End = (Slash == StringViewType::npos) ? PathPart.size() : Slash;
-            if (End > Start)
+            OutNames.emplace_back(PackagePath, FNAME_Find);
+        }
+        if (LastDot != StringViewType::npos)
+        {
+            size_t Start = LastDot + 1;
+            while (Start <= PathPart.size())
             {
-                StringType Component(PathPart.substr(Start, End - Start));
-                if (bFirst && bHadLeadingSlash && !Component.empty() && Component[0] != STR('/'))
+                const size_t Dot = PathPart.find(STR('.'), Start);
+                const size_t End = (Dot == StringViewType::npos) ? PathPart.size() : Dot;
+                if (End > Start)
                 {
-                    Component.insert(Component.begin(), STR('/'));
+                    OutNames.emplace_back(PathPart.substr(Start, End - Start), FNAME_Find);
                 }
-                OutNames.emplace_back(Component, FNAME_Find);
-                bFirst = false;
+                if (Dot == StringViewType::npos) { break; }
+                Start = Dot + 1;
             }
-            if (Slash == StringViewType::npos) { break; }
-            Start = Slash + 1;
         }
     }
 #endif
@@ -793,8 +798,6 @@ namespace RC::Unreal::UObjectGlobals
                     Object = ObjectItem->GetUObject();
                     if (!Object) { return; }
                     if (ObjectItem->IsUnreachable()) { return; }
-                    uintptr_t obj_addr = reinterpret_cast<uintptr_t>(Object);
-                    if (obj_addr < 0x7e0000000000 || obj_addr > 0x7fffffffffff) { return; }
                     int32_t item_flags = *reinterpret_cast<int32_t*>(reinterpret_cast<uint8_t*>(ObjectItem) + 0x8);
                     if (item_flags == 0) { return; }
                     GUOBJECTARRAY_PROFILE_ITER_COUNT()
