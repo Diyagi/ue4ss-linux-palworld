@@ -46,6 +46,7 @@
 #include <UE4SSDebug.hpp>
 #include <USMapGenerator/Generator.hpp>
 #include <Unreal/Core/HAL/Platform.hpp>
+#include <Unreal/FMemory.hpp>
 #include <Unreal/FFrame.hpp>
 #include <Unreal/FURL.hpp>
 #include <Unreal/FWorldContext.hpp>
@@ -2464,6 +2465,26 @@ Overloads:
                 return LoopAction::Continue;
             });
             return 0;
+        });
+
+        lua.register_function("TrimAllocator", [](const LuaMadeSimple::Lua& lua) -> int {
+            if (!Unreal::GMalloc || !*Unreal::GMalloc)
+            {
+                lua.throw_error("TrimAllocator failed: GMalloc is not resolved.");
+                return 0;
+            }
+            (*Unreal::GMalloc)->Trim(true);
+            return 0;
+        });
+
+        lua.register_function("GetObjectCount", [](const LuaMadeSimple::Lua& lua) -> int {
+            if (!Unreal::GUObjectArray)
+            {
+                lua.throw_error("GetObjectCount failed: GUObjectArray is not resolved (stripped binary).");
+                return 0;
+            }
+            lua.set_integer(Unreal::UObjectArray::GetNumElements());
+            return 1;
         });
 
         lua.register_function("NotifyOnNewObject", [](const LuaMadeSimple::Lua& lua) -> int {
