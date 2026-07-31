@@ -187,13 +187,14 @@ namespace RC::Unreal::UObjectGlobals
                         // This catches stale pointers to freed-but-still-mapped objects.
                         else
                         {
-                            uint64_t probe;
-                            struct iovec liov = {&probe, 8};
-                            struct iovec riov = {reinterpret_cast<void*>(OuterAddr), 8};
-                            if (process_vm_readv(getpid(), &liov, 1, &riov, 1, 0) != 8)
-                            {
-                                NextOuter = nullptr;
-                            }
+                            // Direct read — the entire iteration body runs inside
+                            // ue4ss_with_iter_recovery(), so a fault here is caught and
+                            // the item skipped. process_vm_readv() was a syscall per hop
+                            // (~800k syscalls per full scan over 158k objects) that made
+                            // init take many minutes; the recovery wrapper makes it
+                            // redundant.
+                            volatile uint64_t probe = *reinterpret_cast<volatile uint64_t*>(OuterAddr);
+                            (void)probe;
                         }
 #endif
                     }
