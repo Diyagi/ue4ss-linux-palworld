@@ -1,4 +1,9 @@
--- WorkProbe — work-progress catch-up semantics probe (v1.3)
+-- WorkProbe — work-progress catch-up semantics probe (v1.3.1)
+-- v1.3.1: census now categorizes entries (Class CDO / Default__ CDO / live
+-- instance) and logs EVERY live instance name — the v1.3 run found the 3
+-- "work objects" are class default templates, not live state; whether ANY
+-- live UPalWorkProgress instance exists in a working base is the open
+-- question.
 -- v1.3: identity via GetFullName() (the binding PSO proves works —
 -- GetClass():GetName()/GetOuter():GetName() return nil on this fork).
 -- Adds a NAME CENSUS: every object whose full name contains "Work" is
@@ -178,9 +183,16 @@ local function probe_tick()
     -- name. This reveals what the work objects are actually called in THIS
     -- build (the class dumps were 1.0.1-era kit; the live server is
     -- 1.0.2.101103).
+    -- Categorize: Class CDO ("Class /Script/..."), Default__ CDO
+    -- ("Default__..."), or live instance (anything else). v1.3.1 logs ALL
+    -- live instances — the v1.3 run's 3 matches were all Default__ CDOs.
     local by_class = {}
     local census_total = 0
-    local census_samples = {}
+    local census_class = 0
+    local census_default = 0
+    local census_live = 0
+    local live_samples = {}
+    local class_samples = {}
     ForEachUObject(function(object)
         if not is_valid(object) then return end
         local ok, full = pcall(function() return object:GetFullName() end)
@@ -188,15 +200,17 @@ local function probe_tick()
         local name = tostring(full)
         if name:find("Work", 1, true) then
             census_total = census_total + 1
-            local okc, cls_name = pcall(function()
-                local c = object:GetClass()
-                return c and c:GetName() or "?"
-            end)
-            local key = okc and tostring(cls_name) or "?"
-            by_class[key] = (by_class[key] or 0) + 1
-            if #census_samples < 8 then
-                census_samples[#census_samples + 1] = name
+            if name:sub(1, 6) == "Class " then
+                census_class = census_class + 1
+                if #class_samples < 5 then class_samples[#class_samples + 1] = name end
+            elseif name:find("Default__", 1, true) then
+                census_default = census_default + 1
+            else
+                census_live = census_live + 1
+                if #live_samples < 40 then live_samples[#live_samples + 1] = name end
             end
+            local cls_name = name:match("Class (/Script/%S+)") or "?"
+            by_class[cls_name] = (by_class[cls_name] or 0) + 1
         end
     end)
 
@@ -205,10 +219,13 @@ local function probe_tick()
         census_lines[#census_lines + 1] = string.format("%s=%d", k, v)
     end
     table.sort(census_lines)
-    append_line(string.format("%d census total=%d by_class=%s",
-        now, census_total, table.concat(census_lines, " ")))
-    for _, s in ipairs(census_samples) do
-        append_line("  sample: " .. s)
+    append_line(string.format("%d census total=%d class=%d default=%d live=%d by_class=%s",
+        now, census_total, census_class, census_default, census_live, table.concat(census_lines, " ")))
+    for _, s in ipairs(class_samples) do
+        append_line("  class: " .. s)
+    end
+    for _, s in ipairs(live_samples) do
+        append_line("  live: " .. s)
     end
 
     ForEachUObject(function(object)
