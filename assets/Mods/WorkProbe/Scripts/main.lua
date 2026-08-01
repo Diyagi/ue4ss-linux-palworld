@@ -1,4 +1,9 @@
--- WorkProbe — work-progress catch-up semantics probe (v1.6)
+-- WorkProbe — work-progress catch-up semantics probe (v1.7)
+-- v1.7: chunk-index bucketing. The walk fix restored SOME world visibility
+-- (fish shadows, drops, controllers) but still zero pals/base camps with a
+-- player in a working base. The Lua callback receives (object, chunk_index,
+-- object_index) — bucket live objects by chunk to find where the walk
+-- stops or what the later chunks contain.
 -- v1.6: control census — bucket EVERY live (non-reflection) object by class
 -- name and log the top classes. Settles whether the ForEachUObject walk sees
 -- world actors at all (SM census shows objs=403389 with a player in-world;
@@ -215,6 +220,32 @@ local function probe_tick()
     -- Categorize: Class CDO ("Class /Script/..."), Default__ CDO
     -- ("Default__..."), or live instance (anything else). v1.3.1 logs ALL
     -- live instances — the v1.3 run's 3 matches were all Default__ CDOs.
+    -- v1.7: per-chunk live bucketing
+    local live_by_chunk = {}
+    local live_by_chunk_max = 0
+    local slots_visited = 0
+    local slots_max = 0
+    ForEachUObject(function(object, chunk_index, object_index)
+        slots_visited = slots_visited + 1
+        if object_index and object_index > slots_max then slots_max = object_index end
+        if chunk_index and chunk_index > live_by_chunk_max then live_by_chunk_max = chunk_index end
+        if not is_valid(object) then return end
+        local ok, full = pcall(function() return object:GetFullName() end)
+        if not ok or not full then return end
+        local name = tostring(full)
+        if not name:find("Default__", 1, true) and not is_reflection(name) then
+            local ck = tostring(chunk_index or "?")
+            live_by_chunk[ck] = (live_by_chunk[ck] or 0) + 1
+        end
+    end)
+    local chunk_lines = {}
+    for k, v in pairs(live_by_chunk) do
+        chunk_lines[#chunk_lines + 1] = string.format("chunk%s=%d", k, v)
+    end
+    table.sort(chunk_lines)
+    append_line(string.format("%d chunks live=%s max_chunk=%d max_objindex=%d slots_visited=%d",
+        now, table.concat(chunk_lines, " "), live_by_chunk_max, slots_max, slots_visited))
+
     local by_class = {}
     local census_total = 0
     local census_class = 0
