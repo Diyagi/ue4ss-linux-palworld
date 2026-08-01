@@ -110,3 +110,33 @@ Deployable = b23ad7c: walk fixes (address filter / split / KSL name), deadlock f
 3. 🔧 SM v1.7 (Trim policy) + PSO v1.2 after the 48h soak completes
 4. 🔍 rev-2 fork findings (AOB signature, crash dumper) → upstream PRs
 5. 📐 Tradeable configs (1.8 invader, 1.9 autosave, 1.10 drops) — user decision, no action without it
+
+---
+
+## 8. rev-2 fork RE findings (2026-08-01) — T1-T4
+
+### T1 — EngineTick resolution: NOT an AOB — dlsym, and why it failed
+The Linux port's "AOB scan" is a dlsym override (`UE4SSProgram.cpp:1682` → `try_resolve("UGameEngine::Tick")`); Palworld's Linux server strips those symbols from dynsym → null. The fork itself documents why upstream Windows patterns can't work (`UE4SSProgram.cpp:959`). Working path = vtable slot 0x308 (b23ad7c, 0x2F0 was PostExit — silent dead hook).
+**Verified signature** (24 bytes, exactly 1 hit in 140MB binary): UGameEngine::Tick @ 0xaa3cfe0:
+`55 41 57 41 56 41 55 41 54 53 48 83 EC 58 49 89 FC 48 8B BF E0 09 00 00`
+PR design: reuse the existing dl_iterate_phdr exec-segment scanner (StaticConstructObject path, `UE4SSProgram.cpp:1711`) + prologue sanity; keep vtable as is_palworld-gated fallback. → **PR #7 candidate.**
+
+### T2 — CrashDumper: CreateFileW is #ifdef _WIN32-only; the real Linux bug is the handler itself
+Linux has `linux_crash_handler` (open/write/backtrace_symbols_fd) but it calls allocating/locking functions (`fmt::format`, `std::string`, `get_now_as_string`, `UE4SS_DBG`) → heap-corruption crashes **deadlock the game thread inside the handler** — the wedge-saga signature. Fix (minimal, mergeable): static buffers + snprintf + raw write, O_CLOEXEC, time() not the string helper, working-dir captured once at enable(), stderr fallback, offline addr2line, optional fork()-writer. Ensure-paths must NOT route through the handler. → **PR #8 candidate.**
+
+### T3 — Fork hotspots (ranked, all fork-internal)
+1. **engine_tick_hook** (`LuaMod.cpp:4262`): 3+ recursive-mutex lock cycles + vector moves per tick (now live post-0x308). Gate the whole tick path with the codebase's own sticky-atomic pattern (`LuaMod.cpp:6696`) before any lock — ~5 lock cycles/tick saved.
+2. **update_async** (`LuaMod.cpp:7519`): fixed 5ms sleep = 200Hz wake; adaptive (5ms busy / 25-50ms idle).
+3. process_simple_actions: minor vector churn (folds into #1).
+4. ForEachUObject ~0.7%: census cadence tuning.
+5. FName: hot sites static-cached; the "23-byte wrapper" unverified (need pointer).
+
+### T4 — Live CPU (idle ~43%) fully explained
+| ~16% | kernel syscall+seccomp (pthread_sigmask storm ~12% of chains, game wait path) |
+| ~20% | game main-loop region 0x780xx (pool-pop + double-dispatch helper) |
+| ~16% | rdtsc/pause busy-spin cluster 0x7760f40 on task-graph workers (spin-while-idle) |
+| ~11% | UE4SS LuaMod region (EngineTick dispatch + async loop — now active) |
+| ~1.2% | save pipeline (blake3 IOThreadPool + PalSave-Pool) |
+| ~0.9% | ForEachUObject + update_async |
+
+**Verdict:** the 43% is game-side spin/syscall churn, not object churn — consistent with objs flat / RSS climbing (allocator pools → Trim stays the lever). UE4SS's own ~11% is measurable and attackable via T3#1.
