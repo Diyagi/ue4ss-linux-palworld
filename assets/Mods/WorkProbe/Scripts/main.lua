@@ -1,4 +1,7 @@
--- WorkProbe — work-progress catch-up semantics probe (v1.0)
+-- WorkProbe — work-progress catch-up semantics probe (v1.1)
+-- v1.1: log object identity (address + class + outer) so idle singletons are
+-- distinguishable from rotating work assignments (playerless worlds appear to
+-- freeze work simulation entirely — all observed slots stay at zero).
 -- Purpose: answer the community's open question (no public data exists):
 --   does a significance-scaled base-camp tick CREDIT full elapsed Δt to a
 --   UPalWorkProgress (rate preserved → significance tuning is free), or DROP
@@ -165,8 +168,24 @@ local function probe_tick()
             if okc and rem then remain = string.format("%.1f", tonumber(rem) or -1) end
         end
 
-        local row = string.format("%d obj=%-2d tick=%.2f rate=%.3f minint=%.2f remain=%s",
-            now, seen, tick_since or -1, rate or -1, min_interval or -1, remain)
+        -- identity: address + class + outer, to distinguish idle singletons from
+        -- rotating assignments and to correlate with the significance tiers
+        local addr = "?"
+        local okc2, addr_v = pcall(function() return object:GetAddress() end)
+        if okc2 and addr_v then addr = string.format("%x", addr_v) end
+        local cls = "?"
+        local okc3, cls_v = pcall(function() return object:GetClass():GetName() end)
+        if okc3 and cls_v then cls = tostring(cls_v) end
+        local outer = "?"
+        local okc4, outer_v = pcall(function()
+            local o = object:GetOuter()
+            if o then return o:GetName() end
+            return nil
+        end)
+        if okc4 and outer_v then outer = tostring(outer_v) end
+
+        local row = string.format("%d obj=%-2d addr=%s cls=%s outer=%s tick=%.2f rate=%.3f minint=%.2f remain=%s",
+            now, seen, addr, cls, outer, tick_since or -1, rate or -1, min_interval or -1, remain)
         rows[#rows + 1] = row
         sample_count = sample_count + 1
     end)
