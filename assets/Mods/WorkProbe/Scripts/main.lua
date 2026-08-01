@@ -1,7 +1,12 @@
--- WorkProbe — work-progress catch-up semantics probe (v1.1)
+-- WorkProbe — work-progress catch-up semantics probe (v1.2)
 -- v1.1: log object identity (address + class + outer) so idle singletons are
 -- distinguishable from rotating work assignments (playerless worlds appear to
 -- freeze work simulation entirely — all observed slots stay at zero).
+-- v1.2 FIX: LoopInGameThreadWithDelay is AUTO-LOOPING on this fork
+-- (LuaMod.cpp is_looping=true; the process path re-arms execute_at and keeps
+-- the action Active). v1.1 re-armed from inside its own callback, doubling
+-- timers exponentially (observed: 6 runs in 8s at run ~105). Single
+-- registration, no re-arm.
 -- Purpose: answer the community's open question (no public data exists):
 --   does a significance-scaled base-camp tick CREDIT full elapsed Δt to a
 --   UPalWorkProgress (rate preserved → significance tuning is free), or DROP
@@ -199,28 +204,26 @@ local function probe_tick()
     end
 end
 
--- Schedule on the game thread (EngineTick). Self-arms via the fork's
--- ensure_engine_tick_hooked inside LoopInGameThreadWithDelay.
+-- Schedule on the game thread (EngineTick). LoopInGameThreadWithDelay is
+-- AUTO-LOOPING on this fork (action.is_looping=true) — it must NOT be
+-- re-armed from inside its own callback (that doubles timers exponentially;
+-- observed avalanche: 6 runs in 8s at run ~105). A single registration is
+-- the whole schedule.
 local function schedule()
     if type(LoopInGameThreadWithDelay) ~= "function" then
         print(TAG .. " ERROR: LoopInGameThreadWithDelay unavailable; probe disabled")
         return
     end
-    print(TAG .. " scheduling game-thread probe every " .. CFG.interval_sec .. "s")
-    LoopInGameThreadWithDelay(CFG.interval_sec * 1000, function()
-        probe_tick()
-        -- re-arm (LoopInGameThreadWithDelay is a one-shot unless re-registered)
-        schedule()
-    end)
+    print(TAG .. " scheduling game-thread probe every " .. CFG.interval_sec .. "s (auto-looping, no re-arm)")
+    LoopInGameThreadWithDelay(CFG.interval_sec * 1000, probe_tick)
 end
 
--- Defer the first probe ~10s so the world (and work objects) exist.
+-- Defer the first probe ~10s so the world (and work objects) exist; the
+-- looping schedule then takes over on its own cadence.
 local function start()
     print(TAG .. " started")
-    LoopInGameThreadWithDelay(10000, function()
-        probe_tick()
-        schedule()
-    end)
+    ExecuteInGameThreadWithDelay(10000, probe_tick)
+    schedule()
 end
 
 start()
