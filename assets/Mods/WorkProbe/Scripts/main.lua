@@ -1,4 +1,8 @@
--- WorkProbe — work-progress catch-up semantics probe (v1.5)
+-- WorkProbe — work-progress catch-up semantics probe (v1.6)
+-- v1.6: control census — bucket EVERY live (non-reflection) object by class
+-- name and log the top classes. Settles whether the ForEachUObject walk sees
+-- world actors at all (SM census shows objs=403389 with a player in-world;
+-- Work-family live=0 needs a control before being trusted).
 -- v1.5: the v1.4 live bucket was polluted by reflection objects
 -- (Function/DelegateFunction/ScriptStruct/Enum entries created at engine
 -- init occupy the first GUObjectArray positions, so the 60-sample cap
@@ -219,6 +223,9 @@ local function probe_tick()
     local census_reflection = 0
     local live_samples = {}
     local class_samples = {}
+    -- v1.6 control: bucket ALL live objects by class name (first token)
+    local all_live = {}
+    local all_live_count = 0
     ForEachUObject(function(object)
         if not is_valid(object) then return end
         local ok, full = pcall(function() return object:GetFullName() end)
@@ -240,7 +247,23 @@ local function probe_tick()
                 by_class[cls_name] = (by_class[cls_name] or 0) + 1
             end
         end
+        -- v1.6 control: every live object, bucketed by class
+        if not name:find("Default__", 1, true) and not is_reflection(name) then
+            local cls_name = name:match("^(%S+)") or "?"
+            all_live[cls_name] = (all_live[cls_name] or 0) + 1
+            all_live_count = all_live_count + 1
+        end
     end)
+
+    local all_live_lines = {}
+    for k, v in pairs(all_live) do
+        all_live_lines[#all_live_lines + 1] = string.format("%s=%d", k, v)
+    end
+    table.sort(all_live_lines)
+    -- keep the top 20 by value (sort desc by parsing counts) — simple approach:
+    -- log all; the analysis reads the tail anyway
+    append_line(string.format("%d control all_live_total=%d by_class=%s",
+        now, all_live_count, table.concat(all_live_lines, " ")))
 
     local census_lines = {}
     for k, v in pairs(by_class) do
