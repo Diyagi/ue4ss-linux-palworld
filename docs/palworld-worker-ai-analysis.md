@@ -160,3 +160,20 @@ Four-signal soak (populated 683-pal world on test, fresh world on live; zero pla
 **Interpretation:** objs completely flat while RSS climbs steadily (3→6MB/hr, slightly accelerating) — the climb is **allocator pools/fragmentation, not object growth**. This is the oracle's Trim signal: `TrimAllocator` (return free pages to the OS) is the correct lever; a GC trigger would do nothing for this class of growth. At 6MB/hr, 23GB buys weeks; the daily 20:00 UTC restart already bounds it. A periodic game-thread Trim (ServerMaintenance v1.7, pending) should flatten the curve further.
 
 **Open question confirmed as measurement-able:** work-progress catch-up semantics (credit vs drop elapsed time on late camp ticks) — can be tested by comparing work output at different significance tiers.
+
+---
+
+## Addendum B — Character-side per-worker cost (pak-verified)
+
+`BP_MonsterBase_C` (the worker pawn, parent `PalCharacter` native) CDO carries the full per-frame component set with **no tick throttling**:
+`Mesh`, `CharacterMovement`, `CapsuleComponent`, `FootIKComponent`, `LookAtComponent`, `AroundInfoCollectorComponent`, `CharacterParameterComponent`, `DamageReactionComponent`, `StatusComponent`, `ActionComponent`, `AnimNotifyComponent`, `PassiveSkillComponent`, `VisualEffectComponent`, `LiftupObjectComponent`.
+
+`ABP_MonsterBase` (anim instance, parent `PalAnimInstance`) — no CDO tick fields; the anim graph is huge (3.7MB JSON) but its update is animation-driven (importance LOD affects fidelity, not cadence).
+
+**Cost model per worker (all per-frame unless throttled):**
+1. AI controller tick → PawnActions chain → active action Tick (Wait/Approach/Working/WanderingCage)
+2. Character components: movement, FootIK, LookAt, AroundInfoCollector, parameter updates
+3. Anim instance update (importance-LOD-gated fidelity)
+4. Stuck/block detection (`bShouldCheckStuckByTick`)
+
+The only per-worker rate knobs in the whole path: `MinAIActionComponentTickInterval` (CDO 0.05) and the importance thresholds (native defaults, not pak-serialized).
