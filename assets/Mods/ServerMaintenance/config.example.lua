@@ -6,7 +6,8 @@
 -- CFG.snapshots              = true    -- periodic RSS/swap/lua snapshots
 -- CFG.snapshot_interval_sec  = 300     -- seconds between persisted snapshots
 -- CFG.tick_ms                = 30000   -- LoopAsync scheduler tick
--- CFG.census                 = true    -- UObject census per world init (game thread)
+-- CFG.census                 = true    -- periodic UObject census on the game thread
+-- CFG.census_interval_sec    = 300     -- seconds between census calls (v1.6; requires LoopInGameThreadWithDelay)
 -- CFG.console_commands      = true    -- pso_memreport / pso_census / pso_trim
 -- CFG.trim                   = true    -- enable the manual trim probe command
 
@@ -15,6 +16,7 @@ CFG = {
     snapshot_interval_sec = 300,
     tick_ms               = 30000,
     census                = true,
+    census_interval_sec   = 300,
     console_commands      = true,
     trim                  = true,
 }
