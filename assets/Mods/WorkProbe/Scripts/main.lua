@@ -142,11 +142,17 @@ local camp_significance = {}
 
 local function classify_struct(value, label)
     -- try nested member access for structs (FGuid/FTransform/FPalBaseCampSignificanceInfo)
+    -- NOTE: direct member reads return TrivialObject userdata; the proven
+    -- pattern (PSO get_remote_value) is member:get() to resolve remote values.
+    if value == nil then return label .. "=nil" end
     local summary = {}
-    for _, member in ipairs({"A", "B", "C", "D", "X", "Y", "Z", "W", "Translation", "Rotation", "Scale3D", "Tier", "Interval", "Type"}) do
+    for _, member in ipairs({"A", "B", "C", "D", "X", "Y", "Z", "W", "Translation", "Rotation", "Scale3D", "Tier", "Interval", "Type", "ID"}) do
         local ok, v = pcall(function() return value[member] end)
         if ok and v ~= nil then
-            summary[#summary + 1] = member .. "=" .. tostr_safe(v)
+            local resolved = v
+            local ok2, got = pcall(function() return v:get() end)
+            if ok2 and got ~= nil then resolved = got end
+            summary[#summary + 1] = member .. "=" .. tostr_safe(resolved)
         end
     end
     if #summary > 0 then
@@ -155,28 +161,37 @@ local function classify_struct(value, label)
     return label .. "=" .. tostr_safe(value)
 end
 
+local scan_errors = {}
+local function scan_one(object, name)
+    if name:find("PalBaseCampModel", 1, true) and not name:find("Default__", 1, true) and not is_reflection(name) then
+        local id = read_any(object, "ID")
+        local transform = read_any(object, "Transform")
+        local sig = read_any(object, "SignificanceInfo")
+        local entry = classify_struct(id, "id")
+        camp_models[#camp_models + 1] = entry
+        camp_locations[entry] = classify_struct(transform, "tf")
+        camp_significance[entry] = classify_struct(sig, "sig")
+    elseif name:find("PalWorkProgress", 1, true) and not name:find("Default__", 1, true) and not name:find("Class ", 1, true) and not name:find("Function ", 1, true) then
+        local camp = read_any(object, "BaseCampIdBelongTo")
+        local camp_str = classify_struct(camp, "camp")
+        work_camps[name] = camp_str
+    end
+end
+
 local function scan_camps_and_work()
     camp_models = {}
     camp_locations = {}
     work_camps = {}
     camp_significance = {}
+    scan_errors = {}
     ForEachUObject(function(object)
         if not is_valid(object) then return end
         local ok, full = pcall(function() return object:GetFullName() end)
         if not ok or not full then return end
         local name = tostring(full)
-        if name:find("PalBaseCampModel", 1, true) and not name:find("Default__", 1, true) and not is_reflection(name) then
-            local id = read_any(object, "ID")
-            local transform = read_any(object, "Transform")
-            local sig = read_any(object, "SignificanceInfo")
-            local entry = classify_struct(id, "id")
-            camp_models[#camp_models + 1] = entry
-            camp_locations[entry] = classify_struct(transform, "tf")
-            camp_significance[entry] = classify_struct(sig, "sig")
-        elseif name:find("PalWorkProgress", 1, true) and not name:find("Default__", 1, true) and not name:find("Class ", 1, true) and not name:find("Function ", 1, true) then
-            local camp = read_any(object, "BaseCampIdBelongTo")
-            local camp_str = classify_struct(camp, "camp")
-            work_camps[name] = camp_str
+        local ok2, err = pcall(scan_one, object, name)
+        if not ok2 then
+            if #scan_errors < 5 then scan_errors[#scan_errors + 1] = tostring(err) end
         end
     end)
 end
@@ -424,6 +439,9 @@ local function probe_tick()
     local camp_line = string.format("%d camps=%d sigs=%s locs=%s",
         now, #camp_models, table.concat(camp_significance, " | "), table.concat(camp_locations, " | "))
     append_line(camp_line)
+    if #scan_errors > 0 then
+        append_line(string.format("%d scan_errors: %s", now, table.concat(scan_errors, " ; ")))
+    end
     local work_camp_lines = {}
     for name, camp in pairs(work_camps) do
         work_camp_lines[#work_camp_lines + 1] = name .. "->" .. camp
