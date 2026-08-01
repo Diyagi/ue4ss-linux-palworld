@@ -48,11 +48,32 @@ local PLAYER_LOCATION_REFRESH_MS = 1000
 local DORM_AWAKE = 1
 local DORM_DORMANT_ALL = 2
 local SUMMARY_INTERVAL_MS = 60000
+-- v1.2: budgeted proximity-wake sweep for dormant items (checked every
+-- drop-queue pass; full rotation completes in N passes, 1s player-location
+-- cache freshness bounds staleness).
+local DORMANT_WAKE_BUDGET_PER_PASS = 32
+
+-- v1.2: classification memoization TTL. classify_critical_monster() walks the
+-- reflection chain (name + StaticCharacterParameterComponent + 8 reads +
+-- CharacterParameterComponent + IndividualParameter + 8 reads) on every
+-- monster every 2s pass. On the populated world the classification-unready
+-- backlog alone was ~11001 re-walks per pass. Cache results per monster
+-- address for TTL seconds (captures/base reassignment are re-caught within
+-- the TTL window — bounded staleness, massive walk reduction).
+local CLASSIFY_CACHE_TTL_SEC = 60
+local CLASSIFY_CACHE_MAX_ENTRIES = 4096
+
+-- v1.2: re-assert the dedicated-server physics disable on every mesh-tick
+-- pass for non-critical monsters (the flag write at scan time was never
+-- re-asserted — anything re-enabling it silently killed the optimization).
+local RAGDOLL_REASSERT = true
 
 local monster_class = nil
 local detail_log_count = 0
 local drop_detail_log_count = 0
 local initial_scan_done = false
+local classification_cache = {} -- monster address -> {result, expires_at} (v1.2)
+local classification_cache_order = {} -- address queue for LRU eviction (v1.2)
 local drop_item_class = nil
 local tracked_drop_items = {}
 local tracked_drop_count = 0
@@ -61,6 +82,7 @@ local drop_queue_head = 1
 local drop_queue_tail = 0
 local drop_scheduler_started = false
 local dormant_drop_keys = {}
+local dormant_sweep_cursor = nil -- v1.2 rotation cursor for proximity sweep
 local cached_player_locations = {}
 local player_location_scheduler_started = false
 local tracked_monster_components = {}
@@ -97,6 +119,11 @@ local stats = {
     ragdoll_skipped_critical = 0,
     ragdoll_classification_unready = 0,
     monster_tick_failures = 0,
+    classify_cache_hits = 0,
+    classify_cache_misses = 0,
+    classify_cache_evictions = 0,
+    ragdoll_reasserts = 0,
+    drop_dormancy_proximity_woken = 0,
 }
 
 local function log(message)
@@ -162,7 +189,45 @@ local function has_nonzero_guid(guid_value)
     return a ~= 0 or b ~= 0 or c ~= 0 or d ~= 0
 end
 
+local classify_critical_monster_impl = nil -- forward decl (v1.2 memoized wrapper calls this)
+
 local function classify_critical_monster(monster)
+    -- v1.2 memoization: the reflection walk below is the mod's dominant cost on
+    -- a populated world (the unready backlog re-walks every 2s pass). Cache the
+    -- verdict per monster address; captures/reassignment are re-caught within
+    -- CLASSIFY_CACHE_TTL_SEC. All callers run on the game thread, so the cache
+    -- needs no locking.
+    local addr = nil
+    local ok_addr, addr_v = pcall(function() return monster:GetAddress() end)
+    if ok_addr and addr_v then addr = addr_v end
+    if addr ~= nil then
+        local entry = classification_cache[addr]
+        if entry ~= nil then
+            if entry.expires_at > os.clock() then
+                stats.classify_cache_hits = stats.classify_cache_hits + 1
+                return entry.result, entry.reason
+            end
+            classification_cache[addr] = nil
+        end
+    end
+
+    local result, reason = classify_critical_monster_impl(monster)
+    stats.classify_cache_misses = stats.classify_cache_misses + 1
+    if addr ~= nil then
+        classification_cache[addr] = { result = result, reason = reason, expires_at = os.clock() + CLASSIFY_CACHE_TTL_SEC }
+        table.insert(classification_cache_order, addr)
+        if #classification_cache_order > CLASSIFY_CACHE_MAX_ENTRIES then
+            local evicted = table.remove(classification_cache_order, 1)
+            if evicted ~= nil then
+                classification_cache[evicted] = nil
+                stats.classify_cache_evictions = stats.classify_cache_evictions + 1
+            end
+        end
+    end
+    return result, reason
+end
+
+classify_critical_monster_impl = function(monster)
     local name_match = has_critical_name_marker(monster)
     if name_match == nil then
         return nil, "name-unavailable"
@@ -404,7 +469,9 @@ local function stop_drop_item_at_server_transform(actor, key, source)
         if DROP_ENABLE_DORMANCY_AFTER_SETTLE then
             local dormancy_ok = pcall(function() actor:SetNetDormancy(DORM_DORMANT_ALL) end)
             if dormancy_ok then
-                dormant_drop_keys[key] = true
+                -- v1.2: store the actor (not just a flag) so the proximity sweep
+                -- can wake it when a player walks near.
+                dormant_drop_keys[key] = actor
                 stats.drop_dormancy_applied = stats.drop_dormancy_applied + 1
             end
         end
@@ -444,7 +511,13 @@ local function process_drop_item(key)
         end
 
         stats.drop_checks = stats.drop_checks + 1
-        state.elapsed_ms = state.elapsed_ms + DROP_CHECK_INTERVAL_MS
+        -- v1.2: real-clock delta. The previous code assumed perfect
+        -- DROP_CHECK_INTERVAL_MS scheduling; autosave hitches made elapsed
+        -- undercount, so items were tracked past their settle time.
+        local now_clock = os.clock()
+        local since_last = now_clock - (state.last_clock or now_clock)
+        state.last_clock = now_clock
+        state.elapsed_ms = state.elapsed_ms + (since_last * 1000)
 
         local near_player = is_drop_near_player(actor)
         local settle_delay_ms = DROP_MIN_SETTLE_DELAY_MS
@@ -497,6 +570,37 @@ local function process_drop_item(key)
     end
 end
 
+local function sweep_dormant_proximity()
+    -- v1.2: wake dormant drop items that a player has walked near. Previously
+    -- nothing woke them except movement reactivation — a settled item beside a
+    -- player could stay net-dormant (invisible/uninteractable) until something
+    -- else moved it. Budgeted rotation so the sweep stays bounded on worlds
+    -- with hundreds of settled drops.
+    if not DROP_ENABLE_DORMANCY_AFTER_SETTLE or #cached_player_locations == 0 then
+        return
+    end
+
+    local checked = 0
+    local cursor = dormant_sweep_cursor
+    local key = next(dormant_drop_keys, cursor)
+    while key ~= nil and checked < DORMANT_WAKE_BUDGET_PER_PASS do
+        local actor = dormant_drop_keys[key]
+        if not is_valid(actor) then
+            dormant_drop_keys[key] = nil
+        else
+            local ok_near, near = pcall(function() return is_drop_near_player(actor) end)
+            if ok_near and near then
+                wake_drop_item_dormancy(actor, key, "player proximity")
+                stats.drop_dormancy_proximity_woken = stats.drop_dormancy_proximity_woken + 1
+            end
+        end
+        checked = checked + 1
+        cursor = key
+        key = next(dormant_drop_keys, cursor)
+    end
+    dormant_sweep_cursor = cursor
+end
+
 local function process_drop_queue()
     local processed = 0
     local pass_tail = drop_queue_tail
@@ -538,6 +642,7 @@ local function schedule_drop_queue()
     local function schedule_next()
         ExecuteInGameThreadWithDelay(DROP_CHECK_INTERVAL_MS, function()
             process_drop_queue()
+            sweep_dormant_proximity()
             schedule_next()
         end)
     end
@@ -557,6 +662,7 @@ local function track_drop_item(actor, source)
     tracked_drop_items[key] = {
         actor = actor,
         elapsed_ms = 0,
+        last_clock = os.clock(),
         source = source,
     }
     tracked_drop_count = tracked_drop_count + 1
@@ -711,6 +817,21 @@ local function process_monster_tick(key)
             tracked_monster_components[key] = nil
             keep_tracking = false
             return
+        end
+
+        -- v1.2: re-assert the dedicated-server physics disable on every pass.
+        -- The scan-time flag write was never re-asserted; if anything re-enables
+        -- it (spawn resets, game logic), the optimization silently dies.
+        if RAGDOLL_REASSERT then
+            local ok_re, err_re = pcall(function()
+                if component.bEnablePhysicsOnDedicatedServer ~= false then
+                    component.bEnablePhysicsOnDedicatedServer = false
+                    stats.ragdoll_reasserts = stats.ragdoll_reasserts + 1
+                end
+            end)
+            if not ok_re then
+                stats.failures = stats.failures + 1
+            end
         end
 
         local is_battle = monster:GetBattleMode()
@@ -937,16 +1058,18 @@ local function schedule_summary_log()
         ExecuteInGameThreadWithDelay(SUMMARY_INTERVAL_MS, function()
             log(string.format(
                 "summary: ragdoll_components=%d ragdoll_changed=%d ragdoll_calls=%d " ..
-                "ragdoll_critical_skips=%d ragdoll_classify_unready=%d " ..
+                "ragdoll_critical_skips=%d ragdoll_classify_unready=%d ragdoll_reasserts=%d " ..
                 "mesh_tracked=%d mesh_active=%d mesh_changes=%d mesh_restores=%d " ..
                 "mesh_critical_skips=%d mesh_classify_unready=%d mesh_failures=%d " ..
                 "drops_tracked=%d drops_seen=%d drops_stopped=%d drops_timeout=%d drop_checks=%d " ..
-                "drop_near_checks=%d drop_far_checks=%d dormancy=%d dormancy_woken=%d drop_failures=%d",
+                "drop_near_checks=%d drop_far_checks=%d dormancy=%d dormancy_woken=%d dormancy_prox=%d drop_failures=%d " ..
+                "classify_cache_hits=%d classify_cache_misses=%d classify_evict=%d",
                 stats.component_visits,
                 stats.optimized,
                 stats.ragdoll_calls,
                 stats.ragdoll_skipped_critical,
                 stats.ragdoll_classification_unready,
+                stats.ragdoll_reasserts,
                 stats.monster_tick_tracked,
                 table_entry_count(tracked_monster_components),
                 stats.monster_tick_throttled,
@@ -963,7 +1086,11 @@ local function schedule_summary_log()
                 stats.drop_far_or_over_budget_checks,
                 stats.drop_dormancy_applied,
                 stats.drop_dormancy_woken,
-                stats.drop_item_failures
+                stats.drop_dormancy_proximity_woken,
+                stats.drop_item_failures,
+                stats.classify_cache_hits,
+                stats.classify_cache_misses,
+                stats.classify_cache_evictions
             ))
             schedule_next()
         end)
