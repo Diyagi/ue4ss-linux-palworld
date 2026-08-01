@@ -161,6 +161,18 @@ local function classify_struct(value, label)
     return label .. "=" .. tostr_safe(value)
 end
 
+local REFLECTION_PREFIXES = {
+    "Class ", "Function ", "DelegateFunction ", "ScriptStruct ", "Enum ",
+    "Package ", "Interface ", "Field ", "Property ", "Const ",
+}
+
+local function is_reflection(name)
+    for _, p in ipairs(REFLECTION_PREFIXES) do
+        if name:sub(1, #p) == p then return true end
+    end
+    return false
+end
+
 local scan_errors = {}
 local function scan_one(object, name)
     if name:find("PalBaseCampModel", 1, true) and not name:find("Default__", 1, true) and not is_reflection(name) then
@@ -171,7 +183,8 @@ local function scan_one(object, name)
         camp_models[#camp_models + 1] = entry
         camp_locations[entry] = classify_struct(transform, "tf")
         camp_significance[entry] = classify_struct(sig, "sig")
-    elseif name:find("PalWorkProgress", 1, true) and not name:find("Default__", 1, true) and not name:find("Class ", 1, true) and not name:find("Function ", 1, true) then
+    elseif name:find("PalWorkProgress", 1, true) and not name:find("PalWorkProgressManager", 1, true)
+        and not name:find("Default__", 1, true) and not name:find("Class ", 1, true) and not name:find("Function ", 1, true) then
         local camp = read_any(object, "BaseCampIdBelongTo")
         local camp_str = classify_struct(camp, "camp")
         work_camps[name] = camp_str
@@ -262,18 +275,6 @@ local function read_float(obj, name)
     local ok, val = pcall(function() return tonumber(obj[name]) end)
     if not ok then return nil end
     return val
-end
-
-local REFLECTION_PREFIXES = {
-    "Class ", "Function ", "DelegateFunction ", "ScriptStruct ", "Enum ",
-    "Package ", "Interface ", "Field ", "Property ", "Const ",
-}
-
-local function is_reflection(name)
-    for _, p in ipairs(REFLECTION_PREFIXES) do
-        if name:sub(1, #p) == p then return true end
-    end
-    return false
 end
 
 local function census_match(name)
