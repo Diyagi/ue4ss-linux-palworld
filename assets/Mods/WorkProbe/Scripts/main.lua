@@ -1,4 +1,12 @@
--- WorkProbe — work-progress catch-up semantics probe (v1.3.1)
+-- WorkProbe — work-progress catch-up semantics probe (v1.4)
+-- v1.4: census widened — "Work" alone missed the base-camp system: the
+-- manager (BP_PalBaseCampManager_C), worker controllers
+-- (BP_MonsterAIController_BaseCamp_C) and action composites
+-- (BP_AIActionComposite_BaseCamp_C) carry no "Work" substring. Match
+-- Work|BaseCamp|MonsterAIController|PalAIAction so the census can say
+-- whether the base-camp system is alive as UObjects at all vs plain C++
+-- structs (the v1.3.1 result: zero live PalWork* instances while a player
+-- stood in an actively working base).
 -- v1.3.1: census now categorizes entries (Class CDO / Default__ CDO / live
 -- instance) and logs EVERY live instance name — the v1.3 run found the 3
 -- "work objects" are class default templates, not live state; whether ANY
@@ -166,6 +174,13 @@ local function read_float(obj, name)
     return val
 end
 
+local function census_match(name)
+    return name:find("Work", 1, true)
+        or name:find("BaseCamp", 1, true)
+        or name:find("MonsterAIController", 1, true)
+        or name:find("PalAIAction", 1, true)
+end
+
 local function probe_tick()
     local class = get_progress_class()
     if not class then
@@ -198,7 +213,7 @@ local function probe_tick()
         local ok, full = pcall(function() return object:GetFullName() end)
         if not ok or not full then return end
         local name = tostring(full)
-        if name:find("Work", 1, true) then
+        if census_match(name) then
             census_total = census_total + 1
             if name:sub(1, 6) == "Class " then
                 census_class = census_class + 1
@@ -207,7 +222,7 @@ local function probe_tick()
                 census_default = census_default + 1
             else
                 census_live = census_live + 1
-                if #live_samples < 40 then live_samples[#live_samples + 1] = name end
+                if #live_samples < 60 then live_samples[#live_samples + 1] = name end
             end
             local cls_name = name:match("Class (/Script/%S+)") or "?"
             by_class[cls_name] = (by_class[cls_name] or 0) + 1
