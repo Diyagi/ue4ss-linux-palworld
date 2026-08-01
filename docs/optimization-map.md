@@ -1,0 +1,112 @@
+# Palworld Server + UE4SS Fork — Master Optimization Map
+
+**Server:** v1.0.2.101103 (UE 5.1), obnyis/palworld-dedicated-server, Coolify on Oracle Cloud 149.118.136.203
+**Fork:** Qiiks/ue4ss-linux-palworld (upstream BlackBookOfficial), deployable = linux-native @ b23ad7c (lib md5 7276cf93)
+**Date:** 2026-08-01 · **Constraint:** feature-preserving only (never trade features for performance)
+
+Evidence key: 🔬 measured (perf/gdb/soak A/B) · 🧪 community (multi-source, consistent) · 💭 design (dump/mechanism-derived, unmeasured)
+
+---
+
+## 0. Status legend
+
+| Status | Meaning |
+|---|---|
+| ✅ APPLIED | live (or test → pending promotion) |
+| 🔧 QUEUED | designed, awaits soak/approval |
+| 📐 DESIGNED | mapped, needs instrumented test before applying |
+| 🚫 VETOED | user constraint (feature cut / overbuilt / risk) |
+| 🔍 INVESTIGATING | lane in flight |
+
+---
+
+## 1. Config layer (PalWorldSettings.ini / env) — all server-side
+
+| # | Setting | Current | Candidate | Effect (evidence) | Status |
+|---|---|---|---|---|---|
+| 1.1 | NetServerMaxTickRate | 60 (live) / 120 (test) | keep 60 | 8.3→16.6ms/tick budget; >60 doesn't fix rubberbanding; test intentionally heavy | ✅ APPLIED (live), test heavy-by-design |
+| 1.2 | EnableHotReloadSystem | 0 | — | dev feature; double-register hooks on 24/7 | ✅ APPLIED |
+| 1.3 | ItemContainerForceMarkDirtyInterval | 5.0 | — | cuts container re-sync traffic | ✅ APPLIED |
+| 1.4 | ServerReplicatePawnCullDistance | 10000 | — | pals pop in ~100m | ✅ APPLIED |
+| 1.5 | PhysicsActiveDropItemMaxNum | capped | — | stops physics sim of excess items (items still exist) | ✅ APPLIED |
+| 1.6 | Log rotation | 5-day gz | — | disk hygiene | ✅ APPLIED |
+| 1.7 | Daily restart | 20:00 UTC, REST-API-driven | — | bounds memory climb (community floor) | ✅ APPLIED |
+| 1.8 | bEnableInvaderEnemy | true | false | 🧪 ~50% RAM-growth cut (Nodecraft/XGaming/ConnectHosting) | 📐 TRADEABLE (loses base raids) — user decision |
+| 1.9 | AutoSaveSpan | 30s | 300-600s | 🧪 serialize-hitch frequency; crash-loss window grows | 📐 TRADEABLE — user decision |
+| 1.10 | DropItemMaxNum / AliveMaxHours | 3000 / 1.0 | 1000 / 0.5 | 🧪 loose-item actor cull, serialization payload | 📐 TRADEABLE (oldest drops purge) |
+| 1.11 | PalSpawnNumRate | 3.0 (user's 3×) | keep | #1 controllable sim cost — user chose 3× deliberately | 🚫 VETOED (user preference) |
+| 1.12 | BaseCampWorkerMaxNum ini | 15 | — | **confirmed no-op bug** (real lever is DT_BaseCampLevelData) | 🔍 DEAD (no-op) |
+| 1.13 | WorkSpeedRate | 1.0 | — | single global multiplier (players+pals); compensation lever only | 📐 (if ever needed) |
+| 1.14 | Legacy threading args | image defaults | — | 1.0 docs reversed; image sets MULTITHREAD_ENABLED | 🚫 SKIP (A/B only) |
+| 1.15 | GC keys (TimeBetweenPurgingPendingKillObjects etc.) | image 30s | 5s | only reclaimable fraction is pending-kill backlog | 📐 A/B candidate (data pending) |
+| 1.16 | MALLOC_TRIM_THRESHOLD | — | — | dead on glibc ≥2.34 (GLIBC_TUNABLES) | 🚫 DEAD |
+
+## 2. Game internals (pak-verified + live-binary-verified)
+
+Full analysis: `docs/palworld-worker-ai-analysis.md` (addenda A-F). Summary:
+
+- **Worker AI is 100% significance-gated** — live gdb proof: all 42 action components, 8 worker pawns, 39 AI controllers have tick flags set but enable byte=0, never registered. `UPalBaseCampManager::Tick` (slot 103, 0x6ff6f30): Timer@+0x300 vs Interval@+0x2FC → UpdateCamp → WorkerDirector → action Ticks (slot 92). **NOTHING escapes the gate.** The game already implements the user's philosophy.
+- **Significance tiers** (BP_PalBaseCampManager CDO, 5 entries): -1m=0.1s, 500m=1.5s, 2500m=2.5s, 4500m=5s, 6500m+=10s+bUpdateSimple. Per-frame budget BaseCampTickInvokeMaxNumInOneTick=5.
+- **Work progress structurally protected**: UPalWorkProgress own accumulator (ProgressTimeSinceLastTick + TickProcessMinInterval + AutoWorkSelfAmountBySec rate); WPM independent tickfn exists but never registered live. Progress advances only via worker actions in the gated cycle.
+- **Work-catch-up semantics unmeasured** (community gap #2): does a late camp tick credit full Δt (rate preserved) or drop it? Decides whether significance tuning is free.
+
+| # | Lever | What | Feature impact | Evidence | Status |
+|---|---|---|---|---|---|
+| 2.1 | Significance far-tier tuning (4500m: 5→8s, 6500m: 10→20s, add 12km tier) | pak-patch BaseCampSignificanceInfoList | none observable (nobody watches 4.5km+; bUpdateSimple already on) | 💭 design, dump-verified fields | 📐 requires catch-up measurement first |
+| 2.2 | BaseCampTickInvokeMaxNumInOneTick 5→1 | pak | camp updates spread over more frames (latency only) | 💭 FPSFriendlyBases sets 1 | 📐 A/B on test |
+| 2.3 | BaseCampWorkerEventTriggerInterval 90→180s | pak (PalGameSetting CDO) | sanity/event evaluations halved; events rarer | 🔬 CDO value 90.0 verified | 📐 mild, feature-safe |
+| 2.4 | MinAIActionComponentTickInterval 0.05→0.2 | pak | **MOOT — components never tick-enabled** | 🔬 live | 🚫 DEAD |
+| 2.5 | WorkerMaxNum via DT_BaseCampLevelData | pak | fewer workers/base | — | 🚫 VETOED (feature cut) |
+| 2.6 | Work-catch-up runtime test (WorkProbe mod) | game-thread probe of UPalWorkProgress | none (measurement only) | 💭→🔬 | 🔧 QUEUED (unlocks 2.1) |
+
+## 3. Mod layer (UE4SS Lua)
+
+| # | Mod | State | Notes | Status |
+|---|---|---|---|---|
+| 3.1 | AlphaRespawnScheduler | ✅ live+test | 10-min boss cooldown (was 1h); LoopAsync-based (works) | ✅ |
+| 3.2 | PalServerOptimizer v1.0 | ✅ live+test | ragdoll off, mesh-tick, dropped-item budget; **loops verified firing every 60s post-EngineTick-fix** (was inert); mesh_classify_unready=11001 backlog = classification cost | ✅ + 🔧 v1.2 queued |
+| 3.3 | ServerMaintenance v1.6 | ✅ live+test | LoopAsync snapshots (RSS/lua/objs 5-min), config.lua system, versioned | ✅ |
+| 3.4 | UE4SSStatus | ✅ live+test | print-only, zero risk | ✅ |
+| 3.5 | **PSO v1.2** | 📐 | memoize classification per monster via GetAddress (reflection walk N× per spawn), real-clock deltas (os.clock), ragdoll re-assert, dormancy proximity-wake, dropped-item settle fixes | 🔧 QUEUED (after soak) |
+| 3.6 | **SM v1.7** | 📐 | game-thread TrimAllocator policy (EngineTick now works!), census on game-thread hook, allocator-stats exposure for the pooled-size Trim tell | 🔧 QUEUED (after soak) |
+| 3.7 | **WorkProbe** | 📐 | measures work-progress catch-up (2.6) — the community-first result | 🔧 QUEUED |
+
+## 4. Fork layer (UE4SS C++)
+
+Deployable = b23ad7c: walk fixes (address filter / split / KSL name), deadlock fix (13 lazy hooks), sticky atomics, mem API (TrimAllocator/GetObjectCount), EngineTick slot 0x308 fix (restored game-thread timers — PSO loops + census now fire).
+
+| # | Item | State | Notes | Status |
+|---|---|---|---|---|
+| 4.1 | Upstream PRs #2-#6 | ✅ filed | settings-never-throw, ksl-name, walk-fix, lifecycle-hook-deadlock, engine-tick-slot | ✅ |
+| 4.2 | GameEngine::Tick AOB scan | 🔍 | scan returns 0x0; vtable fallback + slot override works; a working signature would let upstream drop the slot hack | 🔍 rev-2 |
+| 4.3 | Linux crash dumper | 🔍 | CrashDumper.cpp uses Windows API (CreateFileW) — empty minidumps, possible report-write hang | 🔍 rev-2 |
+| 4.4 | ForEachUObject cost | 🔬 0.5-1.1% | census + PSO classification walk the object array; GetObjectCount O(1) already in API | 📐 |
+| 4.5 | Hook dispatch per-tick cost | 🔍 | engine_tick_hook / process_event_hook allocations | 🔍 rev-2 |
+
+## 5. Host/infra layer (NEW findings)
+
+| # | Item | Finding | Evidence | Status |
+|---|---|---|---|---|
+| 5.1 | **Docker seccomp filter** | **~4.9% test / ~7.9% live of game CPU in __seccomp_filter** | 🔬 perf A/B (confined vs unconfined, both servers) | ✅ test applied; live → maintenance window |
+| 5.2 | Memory soak (four-signal) | objs flat (357386/160112) while RSS climbs 3-6MB/hr = allocator pools, not objects → **Trim is the lever, GC won't help** | 🔬 7h+ soak | ✅ data |
+| 5.3 | _blake3_compress_xof_avx512 ~1.5% | SteamNetworkingSockets DTLS crypto | 🔬 | irreducible |
+| 5.4 | Unresolved worker addrs 0x755ff44/0x755f8e0 (~7-9%) | stripped binary, no symbols | 🔬 | 🔍 rev-2 |
+| 5.5 | syscall path total | ~15% confined → ~10.5% unconfined | 🔬 | ✅ (5.1) |
+| 5.6 | Save bloat | corpses/spent-eggs/referenced-growth; cleanup tools require stopped server (PST GUI bulk cleanup, palworld-save-tools); no live cleanup exists | 🧪 | 📐 (maintenance-window tool) |
+
+## 6. Frontier experiments (community-first measurements)
+
+| # | Experiment | What it proves | Status |
+|---|---|---|---|
+| 6.1 | Work-catch-up measurement (WorkProbe) | whether significance tuning is free (rate-preserving) or costly (rate-losing) — no public data exists | 🔧 QUEUED |
+| 6.2 | Significance-tier A/B | measured CPU/behavior delta of far-tier tuning on the populated world | 📐 after 6.1 |
+| 6.3 | Seccomp A/B | done — 4.9%/7.9% recovered | ✅ DONE |
+| 6.4 | UE4SS-on-Linux safe-API matrix | our crash taxonomy (load-map hook, async-thread UE API, EngineTick) is frontier knowledge — document for mod authors | 📐 (skill KB exists, formalize) |
+
+## 7. Recommended order
+
+1. ✅ Seccomp → live at next maintenance window (20:00 UTC) — free 8%
+2. 🔧 WorkProbe (6.1) → catch-up data → significance-tier A/B (6.2) on test
+3. 🔧 SM v1.7 (Trim policy) + PSO v1.2 after the 48h soak completes
+4. 🔍 rev-2 fork findings (AOB signature, crash dumper) → upstream PRs
+5. 📐 Tradeable configs (1.8 invader, 1.9 autosave, 1.10 drops) — user decision, no action without it
