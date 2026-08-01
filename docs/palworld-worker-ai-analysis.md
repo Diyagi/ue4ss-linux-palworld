@@ -216,3 +216,28 @@ Assignment configs are **inline in `BP_PalGameSetting` CDO** (no separate datata
 **Cost relevance:** `AffectSanityValue` is the bridge between worker *work ticking* and the *sanity→event* system (DT_BaseCampWorkerEventDataTable triggers at sanity 40-85). This is the game's built-in "overwork" pressure — not a tuning target for us, but the connection explains why event evaluation rides the management cadence (90s interval), not per-worker.
 
 The assignment *matching* runs on the director tick (significance-gated, count cadence per Addendum C) — the per-worker action only *executes* the chosen work type's action.
+
+---
+
+## Addendum E — Live-binary verification (rev-2, gdb on live process, 2026-08-01)
+
+**Mission: confirm whether any per-worker tick escapes the significance gate.**
+
+Method: read-only gdb on the live server process (ET_EXEC non-PIE → link-time vaddrs == runtime addresses; instance vtables = `_ZTV + 0x10`).
+
+### Findings (all live-memory evidence)
+
+1. **No per-frame worker path exists.** Scanned all 42 live `UPalAIActionComponent`s: flags 0x1E (bCanEverTick=1, bStartWithTickEnabled=1) but enable byte @0xB = 0, bRegistered=0, TaskPointer=0 → **tick never enabled**. Same for all 8 worker pawns (`APalMonsterCharacter`) and all 39 `APalAIController`s. Even movement components: tick disabled. **Workers are frozen pawns; AI is 100% manager-driven.**
+2. **The gate is total**: `UPalBaseCampManager::Tick` (vtable slot 103 → 0x6ff6f30):
+   `Timer@+0x300 += Δt; ucomiss vs Interval@+0x2FC; < → return; Timer=0 → UpdateCamp (0x6ff7a90)` → WorkerDirector (0x142ebe0) → per-worker dispatch via slot 92 (`call *0x2e0`): `WorkerWait::Tick` 0x6f92cc0 / `Resurrect::Tick` 0x6f74460. 653 dispatch sites — all inside the manager cycle.
+3. **No escaping per-worker timers.** Worker-side timers (e.g., Resurrect revive state @+0x630) live inside action Tick bodies — only reachable through the gated dispatch.
+4. **WorkProgress independent tick: designed but NOT registered live.** `UPalWorkProgressManager` (0x19ba5b8) embeds `FPalWorkProgressManagerWorkProcessTickFunction` (vtable 0x1a16ed0) at +0x3C8 with a real ExecuteTick (0x76f9e90 → round-robin 0x76f8ab0) — but all live instances have TaskPointer=0, Target=0, regTG=0 → **never registered**; progress advances only via worker work actions in the manager cycle.
+5. `CompositeBase::Tick` = no-op ret (0x690f7a0); `CompositeBaseCamp::Tick` = 0x6f7c340 (child dispatch) — both only via the gated cycle.
+
+### Implications
+
+- **The user's philosophy is already the game's architecture**: worker AI scales by distance (0.1s→10s) with zero feature loss — the significance tiers ARE the per-worker throttle, and there is no unthrottled path.
+- The earlier dump-based "per-frame default" reading (Addendum C v1) was wrong — UE *defaults* allow per-frame, but Palworld *explicitly disables* the ticks in its own init.
+- `MinAIActionComponentTickInterval` lever is moot (components never tick-enabled).
+- Remaining feature-preserving levers: significance tier tuning (widen far ranges), `BaseCampWorkerEventTriggerInterval`, work-progress catch-up verification (does the gated cycle credit full elapsed Δt? — structurally implied by the timer accumulation, still worth a runtime test).
+- With zero players connected, ALL bases sit at the 6500m+ far tier (10s) — so the soak's ~43% CPU is world streaming/wild AI/autosave, NOT base worker AI (which is already at minimum cadence). Worker AI is effectively free in the soak profile.
