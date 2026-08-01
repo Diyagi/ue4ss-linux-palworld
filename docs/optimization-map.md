@@ -140,3 +140,20 @@ Linux has `linux_crash_handler` (open/write/backtrace_symbols_fd) but it calls a
 | ~0.9% | ForEachUObject + update_async |
 
 **Verdict:** the 43% is game-side spin/syscall churn, not object churn — consistent with objs flat / RSS climbing (allocator pools → Trim stays the lever). UE4SS's own ~11% is measurable and attackable via T3#1.
+
+---
+
+## 9. Night-session delivery (2026-08-01) — fork fixes, WorkProbe, PSO v1.2
+
+### Shipped + verified (all on test container, soak continues)
+- **T1 AOB fallback** for UGameEngine::Tick (PR #7): dlsym fails on Palworld (stripped dynsym); verified 24B signature, exactly 1 hit. Functional proof: PSO game-thread loops + census run on schedule.
+- **T2 crash-handler fix** (PR #8): allocation-free, fork()-writer Linux handler — the old handler allocated inside (wedged game thread on heap-corruption crashes; the "signal 0 + empty report" saga).
+- **T3 tick-path gates** (PR #9): 4 sticky atomic flags gate EngineTick/ProcessEvent hooks before the first mutex; adaptive async sleep (50ms idle / next-due wake). Perf after: engine_tick_hook self 0.04%.
+- **Perf re-measure**: libUE4SS total ~1.3-2.8% of game CPU; GetFlagsInternal 1.61% spike = PSO classification passes (sampling-window artifact of the 60s sweep, proves mod-Lua is the fork-side cost — attacked via PSO v1.2, not the tick machinery).
+- **WorkProbe v1.1** (assets/Mods/WorkProbe): UPalWorkProgress catch-up probe. Playerless finding: all slots frozen at zero with stable addresses — work sim doesn't run without players; experiment needs a player on test (18211/test123).
+- **PSO v1.2** (assets/Mods/PalServerOptimizer): classification memoization (60s TTL LRU), real-clock drop deltas, ragdoll re-assert, dormancy proximity-wake. Loaded clean, zero crashes.
+
+### Queued (not started)
+- **Seccomp → live** at the 20:00 UTC daily maintenance window (test already unconfined; A/B measured ~5-8% CPU).
+- **WorkProbe catch-up data** — needs a player on the test server.
+- **Significance-tier pak tuning** — gated on WorkProbe catch-up semantics (Phase 4 decision).
