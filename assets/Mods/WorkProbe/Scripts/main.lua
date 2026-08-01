@@ -1,4 +1,11 @@
--- WorkProbe — work-progress catch-up semantics probe (v1.2)
+-- WorkProbe — work-progress catch-up semantics probe (v1.3)
+-- v1.3: identity via GetFullName() (the binding PSO proves works —
+-- GetClass():GetName()/GetOuter():GetName() return nil on this fork).
+-- Adds a NAME CENSUS: every object whose full name contains "Work" is
+-- grouped by class name and counted, because the observed world has
+-- visible working pals but ZERO live UPalWorkProgress state (2723 probes,
+-- all slots idle) — the work objects must carry a different class in
+-- this build (class dumps were 1.0.1-era kit; server is 1.0.2.101103).
 -- v1.1: log object identity (address + class + outer) so idle singletons are
 -- distinguishable from rotating work assignments (playerless worlds appear to
 -- freeze work simulation entirely — all observed slots stay at zero).
@@ -112,6 +119,7 @@ print(TAG .. " features: gamethread_timer=" .. tostring(type(LoopInGameThreadWit
 -- Probe — GAME THREAD ONLY
 -- ---------------------------------------------------------------------------
 local progress_class = nil
+local multi_class = nil
 local probe_runs = 0
 local sample_count = 0
 
@@ -125,6 +133,16 @@ local function get_progress_class()
         print(TAG .. " WARNING: UPalWorkProgress class NOT found (game version changed?)")
     end
     return progress_class
+end
+
+local function get_multi_class()
+    if multi_class then return multi_class end
+    local ok, cls = pcall(StaticFindObject, "/Script/Pal.PalWorkProgressMultiType")
+    if ok and cls then
+        multi_class = cls
+        print(TAG .. " UPalWorkProgressMultiType class resolved")
+    end
+    return multi_class
 end
 
 local function is_valid(object)
@@ -156,10 +174,50 @@ local function probe_tick()
     local rows = {}
     local seen = 0
 
+    -- NAME CENSUS: group every object whose full name mentions Work by class
+    -- name. This reveals what the work objects are actually called in THIS
+    -- build (the class dumps were 1.0.1-era kit; the live server is
+    -- 1.0.2.101103).
+    local by_class = {}
+    local census_total = 0
+    local census_samples = {}
+    ForEachUObject(function(object)
+        if not is_valid(object) then return end
+        local ok, full = pcall(function() return object:GetFullName() end)
+        if not ok or not full then return end
+        local name = tostring(full)
+        if name:find("Work", 1, true) then
+            census_total = census_total + 1
+            local okc, cls_name = pcall(function()
+                local c = object:GetClass()
+                return c and c:GetName() or "?"
+            end)
+            local key = okc and tostring(cls_name) or "?"
+            by_class[key] = (by_class[key] or 0) + 1
+            if #census_samples < 8 then
+                census_samples[#census_samples + 1] = name
+            end
+        end
+    end)
+
+    local census_lines = {}
+    for k, v in pairs(by_class) do
+        census_lines[#census_lines + 1] = string.format("%s=%d", k, v)
+    end
+    table.sort(census_lines)
+    append_line(string.format("%d census total=%d by_class=%s",
+        now, census_total, table.concat(census_lines, " ")))
+    for _, s in ipairs(census_samples) do
+        append_line("  sample: " .. s)
+    end
+
     ForEachUObject(function(object)
         if seen >= CFG.max_objects then return end
         if not is_valid(object) then return end
-        local ok, is_progress = pcall(function() return object:IsA(class) end)
+        local ok, is_progress = pcall(function()
+            local c = get_multi_class()
+            return object:IsA(class) or (c and object:IsA(c)) or false
+        end)
         if not ok or not is_progress then return end
 
         seen = seen + 1
@@ -173,30 +231,21 @@ local function probe_tick()
             if okc and rem then remain = string.format("%.1f", tonumber(rem) or -1) end
         end
 
-        -- identity: address + class + outer, to distinguish idle singletons from
-        -- rotating assignments and to correlate with the significance tiers
         local addr = "?"
         local okc2, addr_v = pcall(function() return object:GetAddress() end)
         if okc2 and addr_v then addr = string.format("%x", addr_v) end
-        local cls = "?"
-        local okc3, cls_v = pcall(function() return object:GetClass():GetName() end)
-        if okc3 and cls_v then cls = tostring(cls_v) end
-        local outer = "?"
-        local okc4, outer_v = pcall(function()
-            local o = object:GetOuter()
-            if o then return o:GetName() end
-            return nil
-        end)
-        if okc4 and outer_v then outer = tostring(outer_v) end
+        local full = "?"
+        local okc3, full_v = pcall(function() return object:GetFullName() end)
+        if okc3 and full_v then full = tostring(full_v) end
 
-        local row = string.format("%d obj=%-2d addr=%s cls=%s outer=%s tick=%.2f rate=%.3f minint=%.2f remain=%s",
-            now, seen, addr, cls, outer, tick_since or -1, rate or -1, min_interval or -1, remain)
+        local row = string.format("%d obj=%-2d addr=%s name=%s tick=%.2f rate=%.3f minint=%.2f remain=%s",
+            now, seen, addr, full, tick_since or -1, rate or -1, min_interval or -1, remain)
         rows[#rows + 1] = row
         sample_count = sample_count + 1
     end)
 
-    local summary = string.format("%s probe: %d run(s) samples=%d seen_this_run=%d",
-        TAG, probe_runs, sample_count, seen)
+    local summary = string.format("%s probe: %d run(s) samples=%d seen_this_run=%d census_total=%d",
+        TAG, probe_runs, sample_count, seen, census_total)
     print(summary)
     append_line(summary)
     for _, row in ipairs(rows) do
