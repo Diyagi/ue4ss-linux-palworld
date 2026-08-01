@@ -177,3 +177,25 @@ Four-signal soak (populated 683-pal world on test, fresh world on live; zero pla
 4. Stuck/block detection (`bShouldCheckStuckByTick`)
 
 The only per-worker rate knobs in the whole path: `MinAIActionComponentTickInterval` (CDO 0.05) and the importance thresholds (native defaults, not pak-serialized).
+
+---
+
+## Addendum C — Conclusions: what the map means
+
+### Q: "If worker AIs tick less often, do they do less work?"
+
+**The per-worker AI tick is NOT actually slowed by the significance system at all.** The significance tiers (0.1s→10s) gate only the base camp *management* layer (model update, director assignment, events, per-frame budget of 5 invocations). Each worker's AI controller (PawnActions chain) ticks per-frame regardless of distance. So the current server configuration is already "workers at full decision rate everywhere" — the game's own distance scaling applies only to management.
+
+**Work output is structurally protected** — work progress accumulates on per-second rates (`AutoWorkSelfAmountBySec`, `WorkAmountByManMonth`) with its own accumulator, decoupled from the AI tick. The single unproven link: whether the significance-gated camp update, when it runs late, *credits* the full elapsed time (rate preserved) or *drops* it (rate lost). Everything in the dump structure (accumulator pair `ProgressTimeSinceLastTick` + `TickProcessMinInterval` on the work object itself) points to credit-preserving catch-up, but this must be measured at runtime to be certain.
+
+### Feature-preserving levers (the actual "optimize the game" menu)
+
+1. **`MinAIActionComponentTickInterval` 0.05 → 0.2** (pak-patch `BP_MonsterAIController_BaseCamp` CDO): throttles the per-worker action stack to 5Hz instead of 20Hz. Reaction latency only; work rates untouched. **Pending rev-2 binary confirmation of the consumption path.**
+2. **Significance tier tuning** (pak-patch `BaseCampSignificanceInfoList`): widen far-tier distances / extend beyond 6500m. Marginal — far tier already 10s+simple.
+3. **`BaseCampWorkerEventTriggerInterval` 90s → 180s**: halves sanity/event evaluations. Mild behavioral cost (slower sanity feedback).
+4. **Work-catch-up runtime test**: measure output at tier 5 vs tier 1; if credit-preserving, management scaling is free.
+
+### What is NOT on the table (user constraints)
+- `BaseCampWorkerMaxNum` ini — confirmed no-op bug; the real count lever (`DT_BaseCampLevelData.WorkerMaxNum`) is a feature cut → vetoed
+- `BaseCampAreaRange` / base size reductions — feature cuts → vetoed
+- Any per-worker movement/visibility reduction — feature cuts → vetoed
