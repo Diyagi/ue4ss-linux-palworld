@@ -128,3 +128,35 @@ Rate knobs (`UPalGameSetting`): `WorkAmountBySecForPlayer`, `WorkAmountByManMont
 - Pak assets extracted with repak `get` from `Pal-LinuxServer.pak` (test volume), converted with uassetjson wrapper (UAssetAPI v1.1.0, VER_UE5_1, usmap @42cf396), inspected via jq.
 - Class dumps: localcc/PalworldModdingKit @62fad413 (Source/Pal mirror), goku19991998-cell/palworld-internal-dx11 (Dumper-7 SDK), MiauwWare/PalworldSDKHeaders; cross-checked against our pak CDO observations.
 - Live binary RE: gdb on test container (`palworld-test`) — **pending, see addendum**.
+
+---
+
+## Addendum A — Soak measurements (2026-08-01, hours 0-6)
+
+Four-signal soak (populated 683-pal world on test, fresh world on live; zero players; full mod set on the fixed EngineTick build b23ad7c):
+
+**Test (populated world, objs flat at 357386):**
+| hour | RSS | climb |
+|---|---|---|
+| 0 | 1923MB | — |
+| ~4 (census boots) | 1941MB | sawtooth (autosave cycles) |
+| +1 | 1944MB | +3MB |
+| +2 | 1950MB | +6MB/hr |
+| +3 | 1956MB | +6MB/hr |
+| +4 | 1963MB | +6MB/hr |
+| +5 | 1968MB | +6MB/hr |
+
+**Live (fresh world, objs flat at 160112):**
+| hour | RSS | climb |
+|---|---|---|
+| 0 | 1123MB | — |
+| +1 | 1126MB | +3MB/hr |
+| +2 | 1129MB | +3MB/hr |
+| +3 | 1132MB | +3.5MB/hr |
+| +4 | 1136MB | +4MB/hr |
+| +5 | 1143MB | +6MB/hr |
+| +6 | 1149MB | +6MB/hr |
+
+**Interpretation:** objs completely flat while RSS climbs steadily (3→6MB/hr, slightly accelerating) — the climb is **allocator pools/fragmentation, not object growth**. This is the oracle's Trim signal: `TrimAllocator` (return free pages to the OS) is the correct lever; a GC trigger would do nothing for this class of growth. At 6MB/hr, 23GB buys weeks; the daily 20:00 UTC restart already bounds it. A periodic game-thread Trim (ServerMaintenance v1.7, pending) should flatten the curve further.
+
+**Open question confirmed as measurement-able:** work-progress catch-up semantics (credit vs drop elapsed time on late camp ticks) — can be tested by comparing work output at different significance tiers.
