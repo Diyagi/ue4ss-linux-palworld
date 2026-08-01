@@ -184,13 +184,13 @@ The only per-worker rate knobs in the whole path: `MinAIActionComponentTickInter
 
 ### Q: "If worker AIs tick less often, do they do less work?"
 
-**The per-worker AI tick is NOT actually slowed by the significance system at all.** The significance tiers (0.1s→10s) gate only the base camp *management* layer (model update, director assignment, events, per-frame budget of 5 invocations). Each worker's AI controller (PawnActions chain) ticks per-frame regardless of distance. So the current server configuration is already "workers at full decision rate everywhere" — the game's own distance scaling applies only to management.
+**CORRECTED (2026-08-01, live-binary evidence — supersedes the earlier dump-based claim): the game disables per-worker ticking entirely.** `UPalAIActionComponent`, the worker pawns (`APalMonsterCharacter`), and all `APalAIController`s have tick flags set but the enable byte = 0 and tick is never registered in the live process (42 action components, 8 worker pawns, 39 controllers scanned). Worker AI is 100% manager-driven: `UPalBaseCampManager::Tick` (slot 103, 0x6ff6f30) accumulates `Timer@+0x300`, early-returns if below `Interval@+0x2FC` (the significance tier), else resets and dispatches `UpdateCamp` → WorkerDirector → per-worker action Tick (slot 92, `WorkerWait::Tick` 0x6f92cc0, `Resurrect::Tick` 0x6f74460). NOTHING escapes the significance gate. Workers are frozen pawns whose AI runs at the tier cadence.
 
 **Work output is structurally protected** — work progress accumulates on per-second rates (`AutoWorkSelfAmountBySec`, `WorkAmountByManMonth`) with its own accumulator, decoupled from the AI tick. The single unproven link: whether the significance-gated camp update, when it runs late, *credits* the full elapsed time (rate preserved) or *drops* it (rate lost). Everything in the dump structure (accumulator pair `ProgressTimeSinceLastTick` + `TickProcessMinInterval` on the work object itself) points to credit-preserving catch-up, but this must be measured at runtime to be certain.
 
 ### Feature-preserving levers (the actual "optimize the game" menu)
 
-1. **`MinAIActionComponentTickInterval` 0.05 → 0.2** (pak-patch `BP_MonsterAIController_BaseCamp` CDO): throttles the per-worker action stack to 5Hz instead of 20Hz. Reaction latency only; work rates untouched. **Pending rev-2 binary confirmation of the consumption path.**
+1. ~~`MinAIActionComponentTickInterval` 0.05 → 0.2~~ — **MOOT**: the action components are never tick-enabled in the live process (enable byte = 0), so the 20Hz floor never engages. The significance gate is the only worker-AI throttle that exists.
 2. **Significance tier tuning** (pak-patch `BaseCampSignificanceInfoList`): widen far-tier distances / extend beyond 6500m. Marginal — far tier already 10s+simple.
 3. **`BaseCampWorkerEventTriggerInterval` 90s → 180s**: halves sanity/event evaluations. Mild behavioral cost (slower sanity feedback).
 4. **Work-catch-up runtime test**: measure output at tier 5 vs tier 1; if credit-preserving, management scaling is free.
