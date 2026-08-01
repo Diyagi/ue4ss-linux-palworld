@@ -241,3 +241,26 @@ Method: read-only gdb on the live server process (ET_EXEC non-PIE → link-time 
 - `MinAIActionComponentTickInterval` lever is moot (components never tick-enabled).
 - Remaining feature-preserving levers: significance tier tuning (widen far ranges), `BaseCampWorkerEventTriggerInterval`, work-progress catch-up verification (does the gated cycle credit full elapsed Δt? — structurally implied by the timer accumulation, still worth a runtime test).
 - With zero players connected, ALL bases sit at the 6500m+ far tier (10s) — so the soak's ~43% CPU is world streaming/wild AI/autosave, NOT base worker AI (which is already at minimum cadence). Worker AI is effectively free in the soak profile.
+
+---
+
+## Addendum F — Host-level: Docker seccomp filter costs ~4.9% CPU (measured A/B, 2026-08-01)
+
+The Docker default seccomp profile evaluates a filter on EVERY syscall. perf profile of the game process (populated world, 120s @99Hz, confined vs unconfined):
+
+| Symbol | Confined | Unconfined (seccomp=unconfined) |
+|---|---|---|
+| `__seccomp_filter` | 4.32% | 0% |
+| `__secure_computing` | 0.59% | 0% |
+| `do_syscall_64` | 4.96% | 0.73% |
+| `syscall_trace_enter` | 1.01% | 0% |
+| `_copy_to_user` | (below top-30) | 5.19% (kernel memcpy — always present, surfaced) |
+| syscall path total | ~15% | ~10.5% |
+
+**Verdict: ~4.9% of game CPU was seccomp filtering — recovered with `--security-opt seccomp=unconfined`, zero feature impact, zero crash risk.** Applied to the test harness; live application scheduled for the daily 20:00 UTC maintenance window (requires Coolify compose `security_opt` + restart).
+
+**Other profile observations (populated world, idle, tick 120):**
+- `_blake3_compress_xof_avx512` ~1.4-1.6% on IOThreadPool — SteamNetworkingSockets DTLS crypto, irreducible.
+- Unresolved worker-thread addresses 0x755ff44/0x755f8e0 ~9% combined — stripped binary (no symbol table, nm empty); rev-2 lane.
+- Our fork's `ForEachUObject` 0.52% self-time — PSO classification (mesh_classify_unready=11001 backlog); PSO v1.2 memoization target.
+- `pthread_sigmask`/`sigprocmask` ~1.3-1.8% — signal masking; normal.
