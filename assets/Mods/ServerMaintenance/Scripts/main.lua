@@ -26,6 +26,17 @@
 -- Lua heap) at snapshot cadence. Falls back to the old one-shot hook census
 -- if LoopInGameThreadWithDelay is unavailable.
 --
+-- v1.7: CONFIG-GATED automated game-thread Trim probe (default OFF). The
+-- four-signal soak (objs FLAT while RSS climbs 3-6MB/hr) points at allocator
+-- pools (FMallocBinned2), not object growth — Trim is the lever. The fork
+-- API TrimAllocator() is NOT safe from LoopAsync (SIGSEGV, proven twice);
+-- with EngineTick dispatch fixed, it can now run on the game thread via
+-- LoopInGameThreadWithDelay. auto_trim=false by default: the 48h soak must
+-- finish uncontaminated first (the climb is the measurement). Flip
+-- auto_trim=true on test to A/B the trim effect after the baseline.
+-- LoopInGameThreadWithDelay is AUTO-LOOPING — never re-arm it inside its
+-- own callback (timer avalanche; see WorkProbe v1.2).
+--
 -- Thread-safety rule for this fork: if it touches UE objects, it must run on
 -- the game thread. Pure stdlib (io, os) is safe from LoopAsync. The mod's Lua
 -- state is serialized by the fork's thread-actions mutex, so reading the
@@ -44,6 +55,10 @@ local CFG = {
     census_interval_sec   = 300,
     console_commands      = true,
     trim                  = true,
+    -- v1.7: automated game-thread trim probe (default OFF — the soak baseline
+    -- must be measured uncontaminated first; flip to true for the A/B phase).
+    auto_trim             = false,
+    trim_interval_sec     = 3600,
 }
 
 -- Absolute-in-container path (game cwd is /palworld/Pal/Binaries/Linux).
@@ -82,6 +97,8 @@ local TICK_MS = CFG.tick_ms
 local SNAPSHOT_INTERVAL_SEC = CFG.snapshot_interval_sec
 local CENSUS_INTERVAL_SEC = CFG.census_interval_sec or 300
 local CENSUS_MS = CENSUS_INTERVAL_SEC * 1000
+local TRIM_INTERVAL_SEC = CFG.trim_interval_sec or 3600
+local TRIM_MS = TRIM_INTERVAL_SEC * 1000
 
 local SNAPSHOT_PATH_CANDIDATES = {}
 for _, dir in ipairs(MOD_DIR_CANDIDATES) do
@@ -116,7 +133,9 @@ local function detect_features()
         .. " census=" .. tostring(CFG.census)
         .. " census_interval_sec=" .. CENSUS_INTERVAL_SEC
         .. " console_commands=" .. tostring(CFG.console_commands)
-        .. " trim=" .. tostring(CFG.trim))
+        .. " trim=" .. tostring(CFG.trim)
+        .. " auto_trim=" .. tostring(CFG.auto_trim)
+        .. " trim_interval_sec=" .. TRIM_INTERVAL_SEC)
     return features
 end
 
@@ -261,6 +280,34 @@ local function console_trim()
     append_line(line)
 end
 
+-- v1.7: automated game-thread trim probe. Same measurement as pso_trim but
+-- scheduled on the game thread (TrimAllocator SIGSEGVs from LoopAsync).
+-- Auto-looping LoopInGameThreadWithDelay — single registration, no re-arm.
+local function schedule_auto_trim()
+    if not CFG.auto_trim then
+        print(TAG .. " auto-trim disabled in config (default; soak baseline untouched)")
+        return
+    end
+    if not features.timer_gamethread then
+        print(TAG .. " WARNING: no game-thread timer; auto-trim unavailable")
+        return
+    end
+    if not features.trim then
+        print(TAG .. " WARNING: TrimAllocator unavailable in this fork build; auto-trim disabled")
+        return
+    end
+    LoopInGameThreadWithDelay(TRIM_MS, function()
+        local before = read_proc_stat("VmRSS:")
+        local ok = pcall(TrimAllocator)
+        local after = read_proc_stat("VmRSS:")
+        local line = string.format("%d trim_probe before_kb=%d after_kb=%d delta_kb=%d ok=%s reason=auto",
+            os.time(), before, after, (before - after), tostring(ok))
+        print(TAG .. " " .. line)
+        append_line(line)
+    end)
+    print(TAG .. " auto-trim scheduled every " .. TRIM_INTERVAL_SEC .. "s on the game thread (auto-looping)")
+end
+
 if CFG.console_commands and features.console_handler then
     RegisterConsoleCommandGlobalHandler("pso_memreport", function()
         console_memreport()
@@ -278,5 +325,6 @@ if CFG.console_commands and features.console_handler then
 end
 
 schedule_census()
+schedule_auto_trim()
 schedule_tick()
-print(TAG .. " loaded v1.6.0; diagnostics-only phase. Snapshots -> " .. SNAPSHOT_PATH_CANDIDATES[1])
+print(TAG .. " loaded v1.7.0; diagnostics-first phase. Snapshots -> " .. SNAPSHOT_PATH_CANDIDATES[1])

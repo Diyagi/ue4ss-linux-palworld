@@ -10,6 +10,11 @@
 -- CFG.census_interval_sec    = 300     -- seconds between census calls (v1.6; requires LoopInGameThreadWithDelay)
 -- CFG.console_commands      = true    -- pso_memreport / pso_census / pso_trim
 -- CFG.trim                   = true    -- enable the manual trim probe command
+-- CFG.auto_trim              = false   -- v1.7: automated game-thread TrimAllocator probe
+--                                      -- (DEFAULT OFF: the 48h soak baseline must be
+--                                      -- measured uncontaminated first; flip to true for
+--                                      -- the A/B phase after the baseline)
+-- CFG.trim_interval_sec      = 3600    -- seconds between auto-trim probes
 
 CFG = {
     snapshots             = true,
@@ -19,4 +24,6 @@ CFG = {
     census_interval_sec   = 300,
     console_commands      = true,
     trim                  = true,
+    auto_trim             = false,
+    trim_interval_sec     = 3600,
 }
