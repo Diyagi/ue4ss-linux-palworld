@@ -1,3 +1,7 @@
+-- PalServerOptimizer fork (v1.2.1) — see fork repo history for changes.
+-- v1.2.1: proximity-wake sweep disabled + actor refs reverted to flags —
+-- v1.2 crashed the game thread on real drop worlds (stale actor deref in
+-- the 250ms sweep after a player picked up a woken drop).
 local TAG = "[PalServerOptimizer]"
 
 -- This mod is installed only on the dedicated server.  Keep the gameplay
@@ -41,6 +45,19 @@ local DROP_LINEAR_DAMPING = 2.0
 local DROP_CHECK_BUDGET_PER_PASS = 64
 local DROP_ENABLE_DORMANCY_AFTER_SETTLE = true
 local DROP_NEAR_PLAYER_DISTANCE_CM = 3000.0
+-- v1.2.1: proximity-wake sweep is DISABLED by default. v1.2 stored live
+-- actor refs in dormant_drop_keys and woke them when a player walked near;
+-- on a world with real drops this crashed the game thread (SIGSEGV, exit
+-- 139) ~20s after a player joined: the sweep wakes a drop → the player
+-- picks it up → the actor is destroyed → the next 250ms sweep pass calls
+-- K2_GetActorLocation on the freed actor. pcall cannot catch native faults,
+-- and the fork's IsValid (object-map backed) cannot close the
+-- check-then-use window. Movement-reactivation (the engine's own
+-- OnProceedTimerMovementActive hook) still wakes drops when they actually
+-- need to move, which covers the real requirement without the stale-ref
+-- deref. Set to true only if the sweep is proven safe (e.g. with a
+-- re-validated actor lookup each pass).
+local DROP_ENABLE_PROXIMITY_WAKE = false
 local DROP_NEAR_SETTLE_DELAY_MS = 1500
 local DROP_FAR_SETTLE_DELAY_MS = 500
 local DROP_SOFT_PHYSICS_POOL_MAX = 128
@@ -469,9 +486,12 @@ local function stop_drop_item_at_server_transform(actor, key, source)
         if DROP_ENABLE_DORMANCY_AFTER_SETTLE then
             local dormancy_ok = pcall(function() actor:SetNetDormancy(DORM_DORMANT_ALL) end)
             if dormancy_ok then
-                -- v1.2: store the actor (not just a flag) so the proximity sweep
-                -- can wake it when a player walks near.
-                dormant_drop_keys[key] = actor
+                -- v1.2 stored the ACTOR here so the proximity sweep could wake
+                -- it — that caused a UAF crash (see DROP_ENABLE_PROXIMITY_WAKE).
+                -- v1.2.1: store a flag only; the engine's movement-reactivation
+                -- hook is the only waker, and it resolves the actor fresh from
+                -- the hook payload each time.
+                dormant_drop_keys[key] = true
                 stats.drop_dormancy_applied = stats.drop_dormancy_applied + 1
             end
         end
@@ -571,11 +591,12 @@ local function process_drop_item(key)
 end
 
 local function sweep_dormant_proximity()
-    -- v1.2: wake dormant drop items that a player has walked near. Previously
-    -- nothing woke them except movement reactivation — a settled item beside a
-    -- player could stay net-dormant (invisible/uninteractable) until something
-    -- else moved it. Budgeted rotation so the sweep stays bounded on worlds
-    -- with hundreds of settled drops.
+    -- v1.2.1: DISABLED by default — see DROP_ENABLE_PROXIMITY_WAKE. The sweep
+    -- stored live actor refs and deref'd them every pass; on a world with
+    -- real drops this crashed the game thread after a player picked up a
+    -- woken drop (stale ref → K2_GetActorLocation on freed actor → SIGSEGV).
+    -- The engine's movement-reactivation hook covers drop waking safely.
+    if not DROP_ENABLE_PROXIMITY_WAKE then return end
     if not DROP_ENABLE_DORMANCY_AFTER_SETTLE or #cached_player_locations == 0 then
         return
     end
