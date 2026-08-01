@@ -199,3 +199,20 @@ The only per-worker rate knobs in the whole path: `MinAIActionComponentTickInter
 - `BaseCampWorkerMaxNum` ini — confirmed no-op bug; the real count lever (`DT_BaseCampLevelData.WorkerMaxNum`) is a feature cut → vetoed
 - `BaseCampAreaRange` / base size reductions — feature cuts → vetoed
 - Any per-worker movement/visibility reduction — feature cuts → vetoed
+
+---
+
+## Addendum D — Work-assign layer (palpak-verified)
+
+Assignment configs are **inline in `BP_PalGameSetting` CDO** (no separate datatables). Each `WorkAssignDefineData_*` entry (BuildWork_0, FoliageWork_0, ReviveCharacterWork_0, TransportItemInBaseCamp_0, RepairBuildObject_0, ExtinguishBurn_0, CoolOverHeat_0, TreasureBoxUnlock→UnlockTreasureBox{Electric,Fire,Water}...) defines:
+
+- `WorkSuitability` (Handcraft/Deforest/Transport/Watering/Anyone/GenerateElectricity/EmitFlame...)
+- `WorkType` + `ActionType` (the AI action the worker takes)
+- `WorkerMaxNum` — 0 (dynamic), 1 (fixed slot), -1 (unlimited)
+- `AffectSanityValue` = **-0.08 per work tick** (the sanity drain that feeds the worker-event system)
+- `bPlayerWorkable` / `bBaseCampWorkerWorkable` / `WorkableTribeIDs` / `WorkableSizeMin/Max` (assignment filters)
+- `WorkSuitabilityRank`, `bUseMultiWorkType` (rank/multi-type matching)
+
+**Cost relevance:** `AffectSanityValue` is the bridge between worker *work ticking* and the *sanity→event* system (DT_BaseCampWorkerEventDataTable triggers at sanity 40-85). This is the game's built-in "overwork" pressure — not a tuning target for us, but the connection explains why event evaluation rides the management cadence (90s interval), not per-worker.
+
+The assignment *matching* runs on the director tick (significance-gated, count cadence per Addendum C) — the per-worker action only *executes* the chosen work type's action.
