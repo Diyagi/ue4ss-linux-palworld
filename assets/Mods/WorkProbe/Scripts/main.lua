@@ -1,4 +1,13 @@
--- WorkProbe — work-progress catch-up semantics probe (v1.7)
+-- WorkProbe — work-progress catch-up semantics probe (v1.8)
+-- v1.8: camp association. Class dumps (localcc/PalworldModdingKit) show
+-- UPalWorkBase.BaseCampIdBelongTo (FGuid, Replicated) links each work
+-- object to a camp, and UPalBaseCampModel has ID + Transform +
+-- SignificanceInfo. Goal: bucket work objects by camp, compute
+-- camp→player distance → significance tier, then measure effective rate
+-- per tier (the kill-shot for the tuning question). FGuid/FTransform
+-- struct exposure on this fork's Lua binding is unknown — probe
+-- defensively (pcall + tostring + nested member tries) and log what
+-- actually reads.
 -- v1.7: chunk-index bucketing. The walk fix restored SOME world visibility
 -- (fish shadows, drops, controllers) but still zero pals/base camps with a
 -- player in a working base. The Lua callback receives (object, chunk_index,
@@ -104,7 +113,75 @@ load_config()
 local LOG_PATH = nil
 local LOG_PATH_CANDIDATES = { CFG.log_path, "/tmp/workprobe.log" }
 
-local function append_line(text)
+local function is_valid(object)
+    if not object then return false end
+    local ok, valid = pcall(function()
+        local addr = object:GetAddress()
+        return addr ~= nil and addr ~= 0
+    end)
+    return ok and valid
+end
+
+local function read_any(obj, name)
+    local ok, val = pcall(function() return obj[name] end)
+    if not ok then return nil end
+    return val
+end
+
+local function tostr_safe(v)
+    local ok, s = pcall(tostring, v)
+    if ok then return s end
+    return "<tostring-failed>"
+end
+
+-- v1.8: camp association + tier instrumentation (all defensive)
+local camp_models = {}
+local camp_locations = {}
+local work_camps = {}
+local camp_significance = {}
+
+local function classify_struct(value, label)
+    -- try nested member access for structs (FGuid/FTransform/FPalBaseCampSignificanceInfo)
+    local summary = {}
+    for _, member in ipairs({"A", "B", "C", "D", "X", "Y", "Z", "W", "Translation", "Rotation", "Scale3D", "Tier", "Interval", "Type"}) do
+        local ok, v = pcall(function() return value[member] end)
+        if ok and v ~= nil then
+            summary[#summary + 1] = member .. "=" .. tostr_safe(v)
+        end
+    end
+    if #summary > 0 then
+        return label .. "{" .. table.concat(summary, ",") .. "}"
+    end
+    return label .. "=" .. tostr_safe(value)
+end
+
+local function scan_camps_and_work()
+    camp_models = {}
+    camp_locations = {}
+    work_camps = {}
+    camp_significance = {}
+    ForEachUObject(function(object)
+        if not is_valid(object) then return end
+        local ok, full = pcall(function() return object:GetFullName() end)
+        if not ok or not full then return end
+        local name = tostring(full)
+        if name:find("PalBaseCampModel", 1, true) and not name:find("Default__", 1, true) and not is_reflection(name) then
+            local id = read_any(object, "ID")
+            local transform = read_any(object, "Transform")
+            local sig = read_any(object, "SignificanceInfo")
+            local entry = classify_struct(id, "id")
+            camp_models[#camp_models + 1] = entry
+            camp_locations[entry] = classify_struct(transform, "tf")
+            camp_significance[entry] = classify_struct(sig, "sig")
+        elseif name:find("PalWorkProgress", 1, true) and not name:find("Default__", 1, true) and not name:find("Class ", 1, true) and not name:find("Function ", 1, true) then
+            local camp = read_any(object, "BaseCampIdBelongTo")
+            local camp_str = classify_struct(camp, "camp")
+            work_camps[name] = camp_str
+        end
+    end)
+end
+
+local function append_line(text) 
     if not LOG_PATH then
         for _, cand in ipairs(LOG_PATH_CANDIDATES) do
             local ok, f = pcall(io.open, cand, "a")
@@ -163,15 +240,6 @@ local function get_multi_class()
         print(TAG .. " UPalWorkProgressMultiType class resolved")
     end
     return multi_class
-end
-
-local function is_valid(object)
-    if not object then return false end
-    local ok, valid = pcall(function()
-        local addr = object:GetAddress()
-        return addr ~= nil and addr ~= 0
-    end)
-    return ok and valid
 end
 
 -- Read a float property defensively (pusher machinery; safe on game thread)
@@ -350,6 +418,18 @@ local function probe_tick()
     for _, row in ipairs(rows) do
         append_line("  " .. row)
     end
+
+    -- v1.8: camp association + tier (one pass, defensive reads)
+    local scan_ok = pcall(scan_camps_and_work)
+    local camp_line = string.format("%d camps=%d sigs=%s locs=%s",
+        now, #camp_models, table.concat(camp_significance, " | "), table.concat(camp_locations, " | "))
+    append_line(camp_line)
+    local work_camp_lines = {}
+    for name, camp in pairs(work_camps) do
+        work_camp_lines[#work_camp_lines + 1] = name .. "->" .. camp
+    end
+    table.sort(work_camp_lines)
+    append_line(string.format("%d work_camps=%s", now, table.concat(work_camp_lines, " | ")))
 end
 
 -- Schedule on the game thread (EngineTick). LoopInGameThreadWithDelay is
