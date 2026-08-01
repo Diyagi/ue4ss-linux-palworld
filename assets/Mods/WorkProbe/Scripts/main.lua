@@ -1,12 +1,10 @@
--- WorkProbe — work-progress catch-up semantics probe (v1.4)
--- v1.4: census widened — "Work" alone missed the base-camp system: the
--- manager (BP_PalBaseCampManager_C), worker controllers
--- (BP_MonsterAIController_BaseCamp_C) and action composites
--- (BP_AIActionComposite_BaseCamp_C) carry no "Work" substring. Match
--- Work|BaseCamp|MonsterAIController|PalAIAction so the census can say
--- whether the base-camp system is alive as UObjects at all vs plain C++
--- structs (the v1.3.1 result: zero live PalWork* instances while a player
--- stood in an actively working base).
+-- WorkProbe — work-progress catch-up semantics probe (v1.5)
+-- v1.5: the v1.4 live bucket was polluted by reflection objects
+-- (Function/DelegateFunction/ScriptStruct/Enum entries created at engine
+-- init occupy the first GUObjectArray positions, so the 60-sample cap
+-- always cut off before world instances). v1.5 excludes reflection
+-- prefixes entirely, logs instance-like entries only (cap 200), and
+-- parses the class from the first full-name token.
 -- v1.3.1: census now categorizes entries (Class CDO / Default__ CDO / live
 -- instance) and logs EVERY live instance name — the v1.3 run found the 3
 -- "work objects" are class default templates, not live state; whether ANY
@@ -174,6 +172,18 @@ local function read_float(obj, name)
     return val
 end
 
+local REFLECTION_PREFIXES = {
+    "Class ", "Function ", "DelegateFunction ", "ScriptStruct ", "Enum ",
+    "Package ", "Interface ", "Field ", "Property ", "Const ",
+}
+
+local function is_reflection(name)
+    for _, p in ipairs(REFLECTION_PREFIXES) do
+        if name:sub(1, #p) == p then return true end
+    end
+    return false
+end
+
 local function census_match(name)
     return name:find("Work", 1, true)
         or name:find("BaseCamp", 1, true)
@@ -206,6 +216,7 @@ local function probe_tick()
     local census_class = 0
     local census_default = 0
     local census_live = 0
+    local census_reflection = 0
     local live_samples = {}
     local class_samples = {}
     ForEachUObject(function(object)
@@ -220,12 +231,14 @@ local function probe_tick()
                 if #class_samples < 5 then class_samples[#class_samples + 1] = name end
             elseif name:find("Default__", 1, true) then
                 census_default = census_default + 1
+            elseif is_reflection(name) then
+                census_reflection = census_reflection + 1
             else
                 census_live = census_live + 1
-                if #live_samples < 60 then live_samples[#live_samples + 1] = name end
+                if #live_samples < 200 then live_samples[#live_samples + 1] = name end
+                local cls_name = name:match("^(%S+)") or "?"
+                by_class[cls_name] = (by_class[cls_name] or 0) + 1
             end
-            local cls_name = name:match("Class (/Script/%S+)") or "?"
-            by_class[cls_name] = (by_class[cls_name] or 0) + 1
         end
     end)
 
@@ -234,8 +247,8 @@ local function probe_tick()
         census_lines[#census_lines + 1] = string.format("%s=%d", k, v)
     end
     table.sort(census_lines)
-    append_line(string.format("%d census total=%d class=%d default=%d live=%d by_class=%s",
-        now, census_total, census_class, census_default, census_live, table.concat(census_lines, " ")))
+    append_line(string.format("%d census total=%d class=%d default=%d reflection=%d live=%d by_class=%s",
+        now, census_total, census_class, census_default, census_reflection, census_live, table.concat(census_lines, " ")))
     for _, s in ipairs(class_samples) do
         append_line("  class: " .. s)
     end
